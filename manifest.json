@@ -1,0 +1,9 @@
+{
+  "id": "gptviz",
+  "name": "GPTViz",
+  "version": "0.0.1",
+  "minAppVersion": "1.11.4",
+  "description": "Interactive image generation from Markdown prompts using OpenAI.",
+  "author": "Ken Demarest",
+  "isDesktopOnly": false
+}
