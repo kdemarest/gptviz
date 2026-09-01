@@ -12,7 +12,6 @@ GPTViz.DependencyModal = class extends GPTViz.obsidian.Modal {
     onOpen() {
         const contentEl = this.contentEl;
         contentEl.empty();
-
         this.titleEl.textContent = "GPTViz image dependencies";
 
         const list = contentEl.createEl("div");
@@ -46,8 +45,7 @@ GPTViz.DependencyModal = class extends GPTViz.obsidian.Modal {
                 }
             });
 
-            const dependencies = item.createEl("div");
-            dependencies.createEl("strong", {
+            item.createEl("div", {
                 text: row.dependencies.join(", ")
             });
         }
@@ -74,8 +72,9 @@ GPTViz.findStaleDependencies = async function(app) {
         }
 
         const newerDependencies = [];
-        const outputPath = `${markdownFile.basename}.png`;
-        const outputFile = app.vault.getAbstractFileByPath(outputPath);
+        const outputFile = app.vault.getAbstractFileByPath(
+            `${markdownFile.basename}.png`
+        );
 
         for (const imageName of imageNames) {
             const dependencyPath = /\.[^./]+$/.test(imageName)
@@ -108,6 +107,181 @@ GPTViz.findStaleDependencies = async function(app) {
     return rows;
 };
 
+GPTViz.ImageIntegrityModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, rows) {
+        super(app);
+        this.app = app;
+        this.rows = rows;
+    }
+
+    onOpen() {
+        const contentEl = this.contentEl;
+        contentEl.empty();
+        this.titleEl.textContent = "GPTViz image integrity";
+
+        const list = contentEl.createEl("div");
+        list.style.maxHeight = "60vh";
+        list.style.overflowY = "auto";
+
+        for (const row of this.rows) {
+            const item = list.createEl("div");
+            item.style.display = "grid";
+            item.style.gridTemplateColumns = "1fr 1fr";
+            item.style.gap = "1em";
+            item.style.padding = "0.6em 0";
+            item.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+            const fileButton = item.createEl("button", {
+                text: row.fileName
+            });
+            fileButton.style.textAlign = "left";
+            fileButton.addEventListener("click", async () => {
+                const file = this.app.vault.getAbstractFileByPath(
+                    row.filePath
+                );
+
+                if (file) {
+                    await this.app.workspace.getLeaf(true).openFile(file);
+                    this.close();
+                } else {
+                    new GPTViz.obsidian.Notice(
+                        `GPTViz: Markdown file not found: ${row.filePath}`
+                    );
+                }
+            });
+
+            item.createEl("div", {
+                text: row.invalidImages.join(", ")
+            });
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+};
+
+GPTViz.getImageTagReferences = function(text) {
+    const references = [];
+    const addReference = value => {
+        const reference = value.trim()
+            .replace(/^<|>$/g, "")
+            .split("|")[0]
+            .split("#")[0]
+            .trim();
+
+        if (
+            reference &&
+            !/^(?:https?:|app:|data:|mailto:)/i.test(reference)
+        ) {
+            references.push(reference);
+        }
+    };
+
+    for (const match of text.matchAll(/!\[\[([^\]]+)\]\]/g)) {
+        addReference(match[1]);
+    }
+
+    for (const match of text.matchAll(/!\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+[^)]*)?\)/g)) {
+        addReference(match[1]);
+    }
+
+    for (const match of text.matchAll(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
+        addReference(match[1]);
+    }
+
+    for (const match of text.matchAll(/^[ \t]*(?:Images|Photos):[ \t]*(.*)$/gim)) {
+        for (const value of match[1].split(",")) {
+            addReference(value);
+        }
+    }
+
+    return [...new Set(references)];
+};
+
+GPTViz.findInvalidImageReferences = async function(app) {
+    const rows = [];
+
+    for (const markdownFile of app.vault.getMarkdownFiles()) {
+        const content = await app.vault.cachedRead(markdownFile);
+        const invalidImages = [];
+
+        for (const imageReference of GPTViz.getImageTagReferences(content)) {
+            let decodedReference = imageReference;
+
+            try {
+                decodedReference = decodeURIComponent(imageReference);
+            } catch (error) {
+                // Keep the original path when the link contains malformed escapes.
+            }
+
+            const resolvedFile = app.metadataCache.getFirstLinkpathDest(
+                decodedReference,
+                markdownFile.path
+            );
+
+            if (!resolvedFile || !resolvedFile.stat) {
+                invalidImages.push(imageReference);
+            }
+        }
+
+        if (invalidImages.length > 0) {
+            rows.push({
+                fileName: markdownFile.basename,
+                filePath: markdownFile.path,
+                invalidImages: invalidImages
+            });
+        }
+    }
+
+    return rows;
+};
+
+GPTViz.PromptAlignmentModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, resolve) {
+        super(app);
+        this.resolveChoice = resolve;
+        this.choiceMade = false;
+    }
+
+    onOpen() {
+        const contentEl = this.contentEl;
+        contentEl.empty();
+        contentEl.createEl("p", {
+            text: "Align the .md file's image prompt to be equal to the prompt used for this image?"
+        });
+
+        const buttons = contentEl.createEl("div");
+        buttons.style.display = "flex";
+        buttons.style.gap = "0.5em";
+
+        for (const choice of ["Yes", "No", "Cancel"]) {
+            const button = buttons.createEl("button", {
+                text: choice
+            });
+            button.addEventListener("click", () => {
+                this.choiceMade = true;
+                this.resolveChoice(choice);
+                this.close();
+            });
+        }
+    }
+
+    onClose() {
+        if (!this.choiceMade) {
+            this.choiceMade = true;
+            this.resolveChoice("Cancel");
+        }
+        this.contentEl.empty();
+    }
+};
+
+GPTViz.confirmPromptAlignment = function(app) {
+    return new Promise(resolve => {
+        new GPTViz.PromptAlignmentModal(app, resolve).open();
+    });
+};
+
 GPTViz.ResponseModal = class extends GPTViz.obsidian.Modal {
     constructor(app, text) {
         super(app);
@@ -117,22 +291,13 @@ GPTViz.ResponseModal = class extends GPTViz.obsidian.Modal {
     onOpen() {
         const contentEl = this.contentEl;
         contentEl.empty();
-
-        contentEl.createEl("h2", {
-            text: "GPTViz response"
-        });
-
-        contentEl.createEl("pre", {
-            text: this.text
-        });
+        contentEl.createEl("h2", { text: "GPTViz response" });
+        contentEl.createEl("pre", { text: this.text });
 
         const closeButton = contentEl.createEl("button", {
             text: "Close"
         });
-
-        closeButton.addEventListener("click", () => {
-            this.close();
-        });
+        closeButton.addEventListener("click", () => this.close());
     }
 
     onClose() {
@@ -140,209 +305,69 @@ GPTViz.ResponseModal = class extends GPTViz.obsidian.Modal {
     }
 };
 
-GPTViz.ImageModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, candidates, index, activeFile) {
+GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, plugin, context, error) {
         super(app);
-        this.candidates = candidates;
-        this.index = index;
-        this.activeFile = activeFile;
-        this.imageUrl = null;
+        this.plugin = plugin;
+        this.context = context;
+        this.error = error;
     }
 
-    async onOpen() {
+    setError(context, error) {
+        this.context = context;
+        this.error = error;
+
+        if (this.contentEl) {
+            this.render();
+        }
+    }
+
+    render() {
+        const detail = this.error instanceof Error
+            ? this.error.stack || this.error.message
+            : String(this.error);
         const contentEl = this.contentEl;
         contentEl.empty();
+        contentEl.style.display = "flex";
+        contentEl.style.flexDirection = "column";
+        contentEl.style.gap = "1em";
+        contentEl.style.height = "100%";
+        contentEl.style.boxSizing = "border-box";
+        contentEl.style.padding = "2em";
 
-        this.imageEl = contentEl.createEl("img", {
-            attr: {
-                alt: "Generated image"
-            }
+        contentEl.createEl("h2", { text: "GPTViz failure" });
+        contentEl.createEl("p", {
+            text: `Operation: ${this.context}`
         });
+        contentEl.createEl("pre", {
+            text: detail
+        }).style.whiteSpace = "pre-wrap";
 
-        this.imageEl.style.maxWidth = "100%";
-        this.imageEl.style.maxHeight = "70vh";
-        this.imageEl.style.objectFit = "contain";
-
-        const controls = contentEl.createEl("div");
-        controls.style.display = "flex";
-        controls.style.gap = "0.5em";
-        controls.style.marginTop = "1em";
-
-        this.prevButton = controls.createEl("button", {
-            text: "Prev"
+        const clearButton = contentEl.createEl("button", {
+            text: "Clear"
         });
-        this.nextButton = controls.createEl("button", {
-            text: "Next"
-        });
-        this.keepButton = controls.createEl("button", {
-            text: "Keep"
-        });
-
-        this.prevButton.addEventListener("click", async () => {
-            if (this.index > 0) {
-                this.index -= 1;
-                await this.renderCurrentImage();
-            }
-        });
-
-        this.nextButton.addEventListener("click", async () => {
-            if (this.index < this.candidates.length - 1) {
-                this.index += 1;
-                await this.renderCurrentImage();
-            }
-        });
-
-        this.keepButton.addEventListener("click", async () => {
-            await this.keepCurrentImage();
-        });
-
-        await this.renderCurrentImage();
-    }
-
-    async renderCurrentImage() {
-        const candidate = this.candidates[this.index];
-        const binary = await this.app.vault.readBinary(candidate.file);
-
-        if (this.imageUrl) {
-            URL.revokeObjectURL(this.imageUrl);
-        }
-
-        this.imageUrl = URL.createObjectURL(
-            new Blob([binary], { type: "image/png" })
-        );
-        this.imageEl.src = this.imageUrl;
-
-        this.prevButton.disabled = this.index === 0;
-        this.nextButton.disabled =
-            this.index === this.candidates.length - 1;
-
-        const keptFile = this.app.vault.getAbstractFileByPath(
-            `${this.activeFile.basename}.png`
-        );
-        let isKept = false;
-
-        if (keptFile) {
-            const keptBinary = await this.app.vault.readBinary(keptFile);
-            isKept = GPTViz.binaryEqual(binary, keptBinary);
-        }
-
-        this.keepButton.disabled = isKept;
-        this.keepButton.textContent = isKept ? "Kept" : "Keep";
-        this.titleEl.textContent = isKept
-            ? `✓ ${candidate.file.name}`
-            : candidate.file.name;
-        this.titleEl.style.color = isKept
-            ? "var(--color-green)"
-            : "";
-    }
-
-    async keepCurrentImage() {
-        if (this.keepButton.disabled) {
-            return;
-        }
-
-        this.keepButton.disabled = true;
-
-        const candidate = this.candidates[this.index];
-        const binary = await this.app.vault.readBinary(candidate.file);
-        const path = `${this.activeFile.basename}.png`;
-        const keptFile = this.app.vault.getAbstractFileByPath(path);
-
-        if (keptFile) {
-            await this.app.vault.modifyBinary(keptFile, binary);
-        } else {
-            await this.app.vault.createBinary(path, binary);
-        }
-
-        this.keepButton.textContent = "Kept";
-        new GPTViz.obsidian.Notice(
-            `GPTViz: kept ${path}`
-        );
-    }
-
-    onClose() {
-        if (this.imageUrl) {
-            URL.revokeObjectURL(this.imageUrl);
-        }
-        this.contentEl.empty();
-    }
-};
-
-GPTViz.LoadingModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, onCancel, estimatedDurationMs) {
-        super(app);
-        this.onCancel = onCancel;
-        this.estimatedDurationMs = estimatedDurationMs;
+        clearButton.style.alignSelf = "flex-start";
+        clearButton.addEventListener("click", () => this.close());
     }
 
     onOpen() {
-        const style = document.createElement("style");
-        style.textContent = `
-            @keyframes gptviz-spin {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-            }
-        `;
-        document.head.appendChild(style);
-        this.styleEl = style;
-
-        const contentEl = this.contentEl;
-        contentEl.empty();
-        this.startedAt = Date.now();
-
-        const spinner = contentEl.createEl("div");
-        spinner.style.width = "2em";
-        spinner.style.height = "2em";
-        spinner.style.margin = "1em auto";
-        spinner.style.border = "0.3em solid var(--background-modifier-border)";
-        spinner.style.borderTopColor = "var(--interactive-accent)";
-        spinner.style.borderRadius = "50%";
-        spinner.style.animation = "gptviz-spin 1s linear infinite";
-
-        contentEl.createEl("p", {
-            text: "Generating image..."
-        });
-
-        this.progress = contentEl.createEl("progress", {
-            attr: {
-                max: "100",
-                value: "0"
-            }
-        });
-        this.progress.style.width = "100%";
-        this.progress.style.marginBottom = "1em";
-
-        this.progressText = contentEl.createEl("p", {
-            text: `Estimated time: ${Math.round(this.estimatedDurationMs / 1000)} seconds`
-        });
-
-        this.progressInterval = window.setInterval(() => {
-            const elapsed = Date.now() - this.startedAt;
-            const fraction = Math.min(
-                elapsed / this.estimatedDurationMs,
-                0.95
-            );
-
-            this.progress.value = fraction * 100;
-            this.progressText.textContent =
-                `Elapsed: ${Math.round(elapsed / 1000)} seconds`;
-        }, 250);
-
-        const cancelButton = contentEl.createEl("button", {
-            text: "Cancel"
-        });
-
-        cancelButton.addEventListener("click", () => {
-            this.onCancel();
-        });
+        this.modalEl.style.position = "fixed";
+        this.modalEl.style.inset = "0";
+        this.modalEl.style.width = "100vw";
+        this.modalEl.style.height = "100vh";
+        this.modalEl.style.maxWidth = "none";
+        this.modalEl.style.maxHeight = "none";
+        this.modalEl.style.margin = "0";
+        this.modalEl.style.padding = "0";
+        this.modalEl.style.borderRadius = "0";
+        this.modalEl.style.zIndex = "var(--layer-modal)";
+        this.modalEl.classList.add("gptviz-error-modal");
+        this.render();
     }
 
     onClose() {
-        if (this.progressInterval) {
-            window.clearInterval(this.progressInterval);
-        }
-        if (this.styleEl) {
-            this.styleEl.remove();
+        if (this.plugin.errorModal === this) {
+            this.plugin.errorModal = null;
         }
         this.contentEl.empty();
     }
@@ -358,10 +383,7 @@ GPTViz.getImageCandidates = function(app, activeFile) {
             file.extension === "png" &&
             file.name.startsWith(prefix)
         ) {
-            const numberText = file.name.slice(
-                prefix.length,
-                -4
-            );
+            const numberText = file.name.slice(prefix.length, -4);
 
             if (/^[0-9]+$/.test(numberText)) {
                 candidates.push({
@@ -391,102 +413,752 @@ GPTViz.binaryEqual = function(left, right) {
 
     return true;
 };
-
-GPTViz.openImageModal = async function(app, candidates, index, activeFile) {
-    new GPTViz.ImageModal(
-        app,
-        candidates,
-        index,
-        activeFile
-    ).open();
-};
-
-GPTViz.reviewLatestImage = async function(app, activeFile) {
-    const candidates = GPTViz.getImageCandidates(
-        app,
-        activeFile
-    );
-
-    if (candidates.length === 0) {
-        return false;
+GPTViz.fileTimestampOptions = function(file) {
+    if (!file || !file.stat) {
+        return {};
     }
 
-    await GPTViz.openImageModal(
-        app,
-        candidates,
-        candidates.length - 1,
-        activeFile
-    );
+    return {
+        ctime: file.stat.ctime,
+        mtime: file.stat.mtime
+    };
+};
 
-    return true;
+GPTViz.ensureKeptImageCandidate = async function(app, activeFile) {
+    const keptFile = app.vault.getAbstractFileByPath(
+        `${activeFile.basename}.png`
+    );
+    const candidates = GPTViz.getImageCandidates(app, activeFile);
+
+    if (!keptFile || !keptFile.extension) {
+        return candidates;
+    }
+
+    const keptBinary = await app.vault.readBinary(keptFile);
+
+    for (const candidate of candidates) {
+        const candidateBinary = await app.vault.readBinary(candidate.file);
+
+        if (GPTViz.binaryEqual(keptBinary, candidateBinary)) {
+            return candidates;
+        }
+    }
+
+    let candidateBinary = keptBinary;
+    const keptTimestamps = GPTViz.fileTimestampOptions(keptFile);
+    const markdownContent = await app.vault.cachedRead(activeFile);
+    const promptSections = GPTViz.getPromptSectionsFromText(markdownContent);
+
+    if (promptSections.length > 0) {
+        const promptParts = GPTViz.getPromptParts(promptSections[0]);
+        candidateBinary = GPTViz.embedPromptInPng(
+            keptBinary,
+            promptParts.text
+        );
+        await app.vault.modifyBinary(
+            keptFile,
+            candidateBinary,
+            keptTimestamps
+        );
+    }
+
+    await app.vault.createFolder("candidates").catch(() => {});
+
+    const number = candidates.length > 0
+        ? candidates[candidates.length - 1].number + 1
+        : 1;
+    const path = `candidates/${activeFile.basename}-${number}.png`;
+
+    try {
+        await app.vault.createBinary(
+            path,
+            candidateBinary,
+            keptTimestamps
+        );
+    } catch (error) {
+        const refreshedCandidates = GPTViz.getImageCandidates(
+            app,
+            activeFile
+        );
+
+        for (const candidate of refreshedCandidates) {
+            const refreshedCandidateBinary = await app.vault.readBinary(candidate.file);
+
+            if (GPTViz.binaryEqual(candidateBinary, refreshedCandidateBinary)) {
+                return refreshedCandidates;
+            }
+        }
+
+        throw error;
+    }
+
+    return GPTViz.getImageCandidates(app, activeFile);
 };
 
 GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     async onload() {
         await this.loadSettings();
+        await this.appendRunLog();
+
+        this.candidateViewStyle = document.createElement("style");
+        this.candidateViewStyle.textContent = `
+            .gptviz-candidate-active .mobile-navbar {
+                display: none !important;
+            }
+        `;
+        document.head.appendChild(this.candidateViewStyle);
+        this.setCandidateViewActive(false);
 
         this.lastGenerationDurationMs = null;
+        this.lastMarkdownFilePath =
+            this.lastMarkdownFilePath ||
+            this.app.workspace.getActiveFile()?.path || null;
+        this.previousMarkdownLeaf = null;
+        this.markdownReviewActions = new WeakSet();
+        this.markdownReviewActionClass = "gptviz-review-images-action";
+        this.errorModal = null;
+        this.polishPromptCache = {};
+        this.openCandidateViewPromise = null;
+
+        this.registerView(
+            GPTViz.CANDIDATE_VIEW_TYPE,
+            leaf => new GPTViz.CandidateView(leaf, this)
+        );
+
+        this.registerEvent(
+            this.app.workspace.on("file-open", file => {
+                this.addMarkdownReviewActions();
+
+                if (file && file.extension === "md") {
+                    this.rememberMarkdownFile(file);
+                    this.refreshCandidateViews().catch(error => {
+                        this.reportError("refreshing Candidate View after opening a Markdown file", error);
+                    });
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.workspace.on("active-leaf-change", leaf => {
+                const isMarkdownView =
+                    leaf && leaf.view instanceof GPTViz.obsidian.MarkdownView;
+
+                if (isMarkdownView) {
+                    this.rememberMarkdownFile(leaf.view.file);
+                    this.addMarkdownReviewActions();
+                    this.refreshCandidateViews().catch(error => {
+                        this.reportError("refreshing Candidate View after activating a Markdown file", error);
+                    });
+                }
+                this.setCandidateViewActive(
+                    this.isCandidateView(leaf && leaf.view)
+                );
+            })
+        );
+
+        this.registerEvent(
+            this.app.workspace.on("layout-change", () => {
+                this.addMarkdownReviewActions();
+            })
+        );
+        this.addMarkdownReviewActions();
+
+        this.addRibbonIcon(
+            "image",
+            "GPTViz Candidate View",
+            async () => {
+                try {
+                await this.toggleCandidateView();
+            } catch (error) {
+                this.reportError("toggling Candidate View", error);
+            }
+            }
+        );
 
         this.addSettingTab(
             new GPTViz.SettingTab(this.app, this)
         );
 
         this.addCommand({
-            id: "gpt-connect",
-            name: "gpt connect",
-
-            callback: async () => {
-                await this.connect();
-            }
-        });
-
-        this.addCommand({
-            id: "gpt-show-prompt",
-            name: "gpt show prompt",
-
-            editorCallback: editor => {
-                this.showPrompt(editor);
-            }
-        });
-
-        this.addCommand({
             id: "gpt-check-dependencies",
             name: "GPTViz Check Dependencies",
+            callback: async () => await this.checkDependencies()
+        });
 
-            callback: async () => {
-                await this.checkDependencies();
-            }
+        this.addCommand({
+            id: "gpt-image-integrity",
+            name: "GPTViz Image Integrity",
+            callback: async () => await this.checkImageIntegrity()
         });
 
         this.addCommand({
             id: "gpt-generate",
             name: "GPTViz Generate Image",
-
-            editorCallback: async editor => {
-                await this.generate(editor);
-            }
+            editorCallback: async editor => await this.generate(editor)
         });
 
         this.addCommand({
             id: "gpt-review-images",
             name: "GPTViz Review Images",
-
-            editorCallback: async () => {
-                await this.reviewImages();
+            callback: async () => {
+                try {
+                    await this.openCandidateView();
+                } catch (error) {
+                    this.reportError("opening Candidate View from the command", error);
+                }
             }
+        });
+
+        this.app.workspace.onLayoutReady(() => {
+            this.debug("onLayoutReady fired.");
+            this.rebuildCandidateViewAfterReload().catch(error => {
+            this.reportError("recovering Candidate View after plugin reload", error);
+            });
         });
     }
 
+    debug() {}
+
+    async appendLog(text) {
+        const path = "gptviz.log";
+        const adapter = this.app.vault.adapter;
+
+        if (await adapter.exists(path)) {
+            await adapter.append(path, text);
+        } else {
+            await adapter.write(path, text);
+        }
+    }
+
+    async appendRunLog() {
+        await this.appendLog(`\n${new Date().toISOString()}\n\n`);
+    }
+
+    reportError(context, error) {
+        const detail = error instanceof Error
+            ? error.stack || error.message
+            : String(error);
+        const message = `GPTViz ${context} failed: ${detail}`;
+        console.error(message, error);
+        this.appendLog(
+            `ERROR [${new Date().toISOString()}] ${context}\n${detail}\n\n`
+        ).catch(logError => {
+            console.error("GPTViz could not write gptviz.log", logError);
+        });
+
+        if (this.errorModal) {
+            this.errorModal.setError(context, error);
+            return;
+        }
+
+        this.errorModal = new GPTViz.ErrorModal(
+            this.app,
+            this,
+            context,
+            error
+        );
+        this.errorModal.open();
+    }
+
     async loadSettings() {
+        const data = await this.loadData();
         this.settings = Object.assign(
             {},
             GPTViz.DEFAULT_SETTINGS,
-            await this.loadData()
+            data
         );
+        this.lastMarkdownFilePath = data?.lastMarkdownFilePath || null;
+        this.lastCandidatePaths = data?.lastCandidatePaths || {};
     }
 
     async saveSettings() {
-        await this.saveData(this.settings);
+        await this.saveData({
+            ...this.settings,
+            lastMarkdownFilePath: this.lastMarkdownFilePath,
+            lastCandidatePaths: this.lastCandidatePaths
+        });
+    }
+
+    setCandidateViewActive(active) {
+        document.body.classList.toggle(
+            "gptviz-candidate-active",
+            active
+        );
+    }
+
+    onunload() {
+        this.removeMarkdownReviewActions();
+        this.setCandidateViewActive(false);
+
+        if (this.errorModal) {
+            this.errorModal.close();
+            this.errorModal = null;
+        }
+
+        if (this.candidateViewStyle) {
+            this.candidateViewStyle.remove();
+            this.candidateViewStyle = null;
+        }
+    }
+
+    rememberMarkdownFile(file) {
+        if (!file || file.extension !== "md") {
+            return;
+        }
+
+        this.lastMarkdownFilePath = file.path;
+        this.saveData({
+            ...this.settings,
+            lastMarkdownFilePath: this.lastMarkdownFilePath,
+            lastCandidatePaths: this.lastCandidatePaths
+        }).catch(() => {});
+    }
+
+    getLastCandidatePath(markdownPath) {
+        return this.lastCandidatePaths[markdownPath] || null;
+    }
+
+    rememberCandidate(markdownPath, candidatePath) {
+        if (!markdownPath || !candidatePath) {
+            return;
+        }
+
+        this.lastCandidatePaths[markdownPath] = candidatePath;
+        this.saveData({
+            ...this.settings,
+            lastMarkdownFilePath: this.lastMarkdownFilePath,
+            lastCandidatePaths: this.lastCandidatePaths
+        }).catch(() => {});
+    }
+
+    getCurrentMarkdownFile() {
+        const activeView = this.app.workspace.getActiveViewOfType(
+            GPTViz.obsidian.MarkdownView
+        );
+
+        if (activeView && activeView.file) {
+            this.lastMarkdownFilePath = activeView.file.path;
+            return activeView.file;
+        }
+
+        if (this.lastMarkdownFilePath) {
+            const file = this.app.vault.getAbstractFileByPath(
+                this.lastMarkdownFilePath
+            );
+            if (file && file.extension === "md") {
+                return file;
+            }
+        }
+
+        const recentLeaf = this.app.workspace.getMostRecentLeaf();
+        if (
+            recentLeaf &&
+            recentLeaf.view instanceof GPTViz.obsidian.MarkdownView &&
+            recentLeaf.view.file
+        ) {
+            this.rememberMarkdownFile(recentLeaf.view.file);
+            return recentLeaf.view.file;
+        }
+
+        return null;
+    }
+
+    getMarkdownEditor(file) {
+        if (!file) {
+            return null;
+        }
+
+        if (
+            this.previousMarkdownLeaf &&
+            this.previousMarkdownLeaf.view instanceof GPTViz.obsidian.MarkdownView &&
+            this.previousMarkdownLeaf.view.file.path === file.path
+        ) {
+            return this.previousMarkdownLeaf.view.editor;
+        }
+
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            if (
+                leaf.view instanceof GPTViz.obsidian.MarkdownView &&
+                leaf.view.file.path === file.path
+            ) {
+                return leaf.view.editor;
+            }
+        }
+
+        return null;
+    }
+
+    getCurrentPromptForFile(file) {
+        const editor = this.getMarkdownEditor(file);
+        if (!editor) {
+            return null;
+        }
+
+        const section = GPTViz.getPromptSection(editor);
+        return section ? GPTViz.getPromptParts(section).text : null;
+    }
+
+    async alignMarkdownPrompt(file, savedPrompt) {
+        const editor = this.getMarkdownEditor(file);
+        if (!editor) {
+            throw new Error(
+                this.describeMarkdownEditorFailure(file)
+            );
+        }
+
+        const section = GPTViz.getPromptSection(editor);
+        if (!section) {
+            throw new Error("No Prompt section found in the Markdown file.");
+        }
+
+        const sectionLines = section.text.split("\n");
+        const imageLines = sectionLines.filter(
+            line => /^[ \t]*Images:[ \t]*(.*)$/i.test(line)
+        );
+        const savedLines = savedPrompt.split("\n");
+        const savedHeading = GPTViz.parseHeading(savedLines[0]);
+        const alignedLines = [
+            sectionLines[0],
+            ...imageLines,
+            ...(savedHeading ? savedLines.slice(1) : savedLines)
+        ];
+        const endLine = section.endLine - 1;
+        const endChar = editor.getLine(endLine).length;
+
+        editor.replaceRange(
+            alignedLines.join("\n"),
+            { line: section.startLine, ch: 0 },
+            { line: endLine, ch: endChar }
+        );
+    }
+
+    getCurrentMarkdownEditor() {
+        return this.getMarkdownEditor(this.getCurrentMarkdownFile());
+    }
+
+    removeMarkdownReviewActions() {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+
+            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
+                continue;
+            }
+
+            view.containerEl
+                .querySelectorAll(`.${this.markdownReviewActionClass}`)
+                .forEach(action => action.remove());
+
+            view.containerEl
+                .querySelectorAll('[aria-label="Review images"], [title="Review images"]')
+                .forEach(action => action.remove());
+        }
+    }
+
+    addMarkdownReviewActions() {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+
+            if (
+                !(view instanceof GPTViz.obsidian.MarkdownView) ||
+                !view.file ||
+                this.markdownReviewActions.has(view)
+            ) {
+                continue;
+            }
+
+            const existingActions = view.containerEl.querySelectorAll(
+                `.${this.markdownReviewActionClass}, [aria-label="Review images"], [title="Review images"]`
+            );
+            existingActions.forEach(action => action.remove());
+
+            const action = view.addAction(
+                "image",
+                "Review images",
+                async () => {
+                    try {
+                        await this.openCandidateView(null, leaf);
+                    } catch (error) {
+                        this.reportError(
+                            "opening Candidate View from the Markdown image action",
+                            error
+                        );
+                    }
+                }
+            );
+
+            if (action) {
+                action.classList.add(this.markdownReviewActionClass);
+                action.dataset.gptvizReviewImages = "true";
+            }
+            this.markdownReviewActions.add(view);
+        }
+    }
+
+    isCandidateView(view) {
+        return view && typeof view.getViewType === "function" &&
+            view.getViewType() === GPTViz.CANDIDATE_VIEW_TYPE;
+    }
+
+    getCandidateView() {
+        const leaf = this.app.workspace.getLeavesOfType(
+            GPTViz.CANDIDATE_VIEW_TYPE
+        )[0];
+        return leaf && this.isCandidateView(leaf.view)
+            ? leaf.view
+            : null;
+    }
+
+    async rebuildCandidateViewAfterReload() {
+        const workspace = this.app.workspace;
+        let candidateLeaves = workspace.getLeavesOfType(
+            GPTViz.CANDIDATE_VIEW_TYPE
+        );
+        const rememberedPath = this.getLastCandidatePath(
+            this.lastMarkdownFilePath
+        );
+
+        this.debug(`reload recovery: candidate leaf count=${candidateLeaves.length}`);
+        for (const candidateLeaf of candidateLeaves) {
+            const view = candidateLeaf.view;
+            this.debug(
+                `old leaf: viewType=${typeof view?.getViewType === "function" ? view.getViewType() : "<none>"}, ` +
+                `constructor=${view?.constructor?.name || "<none>"}, ` +
+                `hasRefresh=${typeof view?.refresh === "function"}`
+            );
+        }
+
+        if (candidateLeaves.length === 0 && !rememberedPath) {
+            this.debug("reload recovery: no existing candidate leaf and no remembered candidate.");
+            return;
+        }
+
+        if (candidateLeaves.length === 0) {
+            this.debug(
+                `reload recovery: no existing candidate leaf; creating one for ${rememberedPath}.`
+            );
+        }
+
+        const wasActive = candidateLeaves.some(
+            leaf => workspace.activeLeaf === leaf
+        );
+        this.debug(`reload recovery: wasActive=${wasActive}, rememberedPath=${rememberedPath || "<none>"}`);
+
+        for (const leaf of candidateLeaves) {
+            leaf.detach();
+        }
+        if (candidateLeaves.length > 0) {
+            this.debug("reload recovery: old candidate leaf detached.");
+        }
+
+        const leaf = workspace.getLeaf("tab");
+        await leaf.setViewState({
+            type: GPTViz.CANDIDATE_VIEW_TYPE,
+            active: wasActive || candidateLeaves.length === 0
+        });
+        this.debug(
+            `reload recovery: new leaf viewType=${typeof leaf.view?.getViewType === "function" ? leaf.view.getViewType() : "<none>"}, ` +
+            `constructor=${leaf.view?.constructor?.name || "<none>"}, ` +
+            `hasRefresh=${typeof leaf.view?.refresh === "function"}`
+        );
+
+        if (wasActive || candidateLeaves.length === 0) {
+            await workspace.revealLeaf(leaf);
+            this.setCandidateViewActive(true);
+            this.debug("reload recovery: new leaf revealed.");
+        }
+
+        if (
+            this.isCandidateView(leaf.view) &&
+            typeof leaf.view.refresh === "function"
+        ) {
+            leaf.view.plugin = this;
+            this.debug("reload recovery: starting fresh view refresh.");
+            await leaf.view.refresh(rememberedPath);
+            this.debug("reload recovery: fresh view refresh completed.");
+        } else {
+            this.debug("reload recovery: new leaf is not refreshable.");
+        }
+    }
+
+    async refreshCandidateViews(preferredPath) {
+        const currentFile = this.getCurrentMarkdownFile();
+        const currentPath = currentFile ? currentFile.path : null;
+
+        for (const leaf of this.app.workspace.getLeavesOfType(
+            GPTViz.CANDIDATE_VIEW_TYPE
+        )) {
+            if (
+                this.isCandidateView(leaf.view) &&
+                typeof leaf.view.refresh === "function"
+            ) {
+                if (
+                    !preferredPath &&
+                    leaf.view.activeFile &&
+                    leaf.view.activeFile.path === currentPath
+                ) {
+                    continue;
+                }
+
+                leaf.view.plugin = this;
+                await leaf.view.refresh(preferredPath);
+            }
+        }
+    }
+
+    describeMarkdownEditorFailure(file) {
+        const workspace = this.app.workspace;
+        const activeLeaf = workspace.activeLeaf;
+        const activeView = activeLeaf && activeLeaf.view;
+        const markdownLeaves = workspace.getLeavesOfType("markdown");
+        const requestedPath = file ? file.path : "<none>";
+        const activeViewType = activeView && typeof activeView.getViewType === "function"
+            ? activeView.getViewType()
+            : activeView?.constructor?.name || "<none>";
+        const activeViewFile = activeView?.file?.path || "<none>";
+        const leafDetails = markdownLeaves.length === 0
+            ? "  <none>"
+            : markdownLeaves.map((leaf, index) => {
+                const view = leaf.view;
+                const viewFile = view?.file?.path || "<none>";
+                const isMarkdownView = view instanceof GPTViz.obsidian.MarkdownView;
+                const hasEditor = Boolean(view?.editor);
+                return `  ${index + 1}. file=${viewFile}; ` +
+                    `isMarkdownView=${isMarkdownView}; hasEditor=${hasEditor}; ` +
+                    `isActive=${workspace.activeLeaf === leaf}`;
+            }).join("\n");
+
+        const reasons = [];
+        if (!file) {
+            reasons.push("No Markdown file could be resolved for the generation request.");
+        } else if (markdownLeaves.length === 0) {
+            reasons.push("The workspace returned no leaves of type 'markdown'.");
+        } else {
+            const matchingLeaves = markdownLeaves.filter(leaf =>
+                leaf.view?.file?.path === file.path
+            );
+            if (matchingLeaves.length === 0) {
+                reasons.push(`No Markdown leaf is showing the requested file: ${file.path}.`);
+            } else if (!matchingLeaves.some(leaf => Boolean(leaf.view?.editor))) {
+                reasons.push(`A Markdown leaf matches ${file.path}, but none exposes an editor.`);
+            }
+        }
+
+        return [
+            "No active Markdown editor was found.",
+            `Reason: ${reasons.join(" ")}`,
+            `Requested file: ${requestedPath}`,
+            `Remembered Markdown file: ${this.lastMarkdownFilePath || "<none>"}`,
+            `Active leaf view type: ${activeViewType}`,
+            `Active view file: ${activeViewFile}`,
+            `Markdown leaf count: ${markdownLeaves.length}`,
+            "Markdown leaves:",
+            leafDetails
+        ].join("\n");
+    }
+
+    async generateActiveMarkdown(file, progressView) {
+        const requestedFile = file || this.getCurrentMarkdownFile();
+        const editor = this.getMarkdownEditor(requestedFile);
+
+        if (!editor) {
+            throw new Error(
+                this.describeMarkdownEditorFailure(requestedFile)
+            );
+        }
+
+        await this.generate(editor, requestedFile, progressView);
+    }
+
+    async openCandidateView(preferredPath, sourceLeaf) {
+        if (this.openCandidateViewPromise) {
+            return this.openCandidateViewPromise;
+        }
+
+        this.openCandidateViewPromise = this.openCandidateViewNow(
+            preferredPath,
+            sourceLeaf
+        );
+
+        try {
+            return await this.openCandidateViewPromise;
+        } finally {
+            this.openCandidateViewPromise = null;
+        }
+    }
+
+    async openCandidateViewNow(preferredPath, sourceLeaf) {
+        const workspace = this.app.workspace;
+        const markdownView = sourceLeaf &&
+            sourceLeaf.view instanceof GPTViz.obsidian.MarkdownView
+            ? sourceLeaf.view
+            : workspace.getActiveViewOfType(
+                GPTViz.obsidian.MarkdownView
+            );
+
+        if (markdownView && markdownView.leaf) {
+            this.previousMarkdownLeaf = markdownView.leaf;
+            this.lastMarkdownFilePath = markdownView.file.path;
+        }
+
+        const candidateLeaves = workspace.getLeavesOfType(
+            GPTViz.CANDIDATE_VIEW_TYPE
+        );
+        let leaf = candidateLeaves[0];
+
+        for (const duplicateLeaf of candidateLeaves.slice(1)) {
+            duplicateLeaf.detach();
+        }
+
+        if (!leaf) {
+            leaf = workspace.getLeaf("tab");
+            await leaf.setViewState({
+                type: GPTViz.CANDIDATE_VIEW_TYPE,
+                active: true
+            });
+        }
+
+        await workspace.revealLeaf(leaf);
+        this.setCandidateViewActive(true);
+
+        if (this.isCandidateView(leaf.view)) {
+            leaf.view.plugin = this;
+            const rememberedPath = markdownView && markdownView.file
+                ? this.getLastCandidatePath(markdownView.file.path)
+                : this.getLastCandidatePath(this.lastMarkdownFilePath);
+            const targetPath = markdownView && markdownView.file
+                ? markdownView.file.path
+                : this.lastMarkdownFilePath;
+            const needsRefresh = Boolean(preferredPath) ||
+                !leaf.view.activeFile ||
+                leaf.view.activeFile.path !== targetPath;
+
+            if (needsRefresh) {
+                await leaf.view.refresh(preferredPath || rememberedPath);
+            }
+        } else {
+            throw new Error(
+                `Candidate View leaf has unexpected view type: ${leaf.view?.getViewType?.() || "<none>"}`
+            );
+        }
+    }
+
+    async toggleCandidateView() {
+        const activeLeaf = this.app.workspace.activeLeaf;
+
+        if (
+            activeLeaf &&
+            this.isCandidateView(activeLeaf.view)
+        ) {
+            if (this.previousMarkdownLeaf) {
+                await this.app.workspace.revealLeaf(
+                    this.previousMarkdownLeaf
+                );
+                this.setCandidateViewActive(false);
+            }
+            return;
+        }
+
+        await this.openCandidateView();
     }
 
     async connect() {
@@ -513,21 +1185,9 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             const result =
                 await GPTViz.testOpenAIConnection(apiKey);
 
-            new GPTViz.obsidian.Notice(
-                `GPTViz: ${result}`
-            );
-
+            new GPTViz.obsidian.Notice(`GPTViz: ${result}`);
         } catch (error) {
-            console.error("GPTViz connection error:", error);
-
-            const message =
-                error instanceof Error
-                    ? error.message
-                    : String(error);
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz failed: ${message}`
-            );
+            this.reportError("connecting to OpenAI", error);
         }
     }
 
@@ -544,18 +1204,203 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             new GPTViz.DependencyModal(this.app, rows).open();
         } catch (error) {
-            const message =
-                error instanceof Error
-                    ? error.message
-                    : String(error);
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz dependency check failed: ${message}`
-            );
+            this.reportError("checking image dependencies", error);
         }
     }
 
-    async generate(editor) {
+    async checkImageIntegrity() {
+        try {
+            const rows = await GPTViz.findInvalidImageReferences(this.app);
+
+            if (rows.length === 0) {
+                new GPTViz.obsidian.Notice(
+                    "GPTViz: no invalid image references found."
+                );
+                return;
+            }
+
+            new GPTViz.ImageIntegrityModal(this.app, rows).open();
+        } catch (error) {
+            this.reportError("checking image integrity", error);
+        }
+    }
+
+    async polishActiveMarkdown(file, progressView, promptText) {
+        const activeFile = file || this.getCurrentMarkdownFile();
+
+        if (!activeFile) {
+            new GPTViz.obsidian.Notice(
+                "GPTViz: no active Markdown file."
+            );
+            return;
+        }
+
+        const candidate = progressView && progressView.candidates
+            ? progressView.candidates[progressView.index]
+            : null;
+        if (!candidate || !candidate.file) {
+            throw new Error("No candidate image is selected.");
+        }
+
+        if (typeof promptText !== "string") {
+            throw new Error("No Polish prompt text was supplied.");
+        }
+
+        this.polishPromptCache[activeFile.basename] = promptText;
+        const executionPrompt = promptText.replaceAll(
+            "[[self]]",
+            candidate.file.name
+        );
+
+        const secretName = this.settings.apiKeySecret;
+        const apiKey = secretName
+            ? this.app.secretStorage.getSecret(secretName)
+            : "";
+
+        if (!apiKey) {
+            new GPTViz.obsidian.Notice(
+                secretName
+                    ? "GPTViz: API key not found."
+                    : "GPTViz: API key not configured."
+            );
+            return;
+        }
+
+        let progressOwner = progressView || this.getCandidateView();
+        let cancelled = false;
+        let generationStartedAt = 0;
+
+        try {
+            const sourceBinary = await this.app.vault.readBinary(candidate.file);
+            const selectedCandidatePrompt = GPTViz.extractPromptFromPng(sourceBinary);
+            const promptParts = GPTViz.getPromptPartsFromText(executionPrompt);
+            const imageNames = promptParts.imageNames.length > 0
+                ? promptParts.imageNames
+                : [candidate.file.path];
+            const loadedImages = await GPTViz.loadPromptImages(
+                this.app,
+                imageNames
+            );
+
+            if (loadedImages.warnings.length > 0) {
+                new GPTViz.ResponseModal(
+                    this.app,
+                    loadedImages.warnings.join("\n")
+                ).open();
+                return;
+            }
+
+            const sourcePrompt = loadedImages.sourcePrompts.find(
+                item => item.prompt !== null && item.prompt.trim() !== ""
+            );
+            const originalPrompt = sourcePrompt
+                ? sourcePrompt.prompt
+                : selectedCandidatePrompt;
+
+            if (originalPrompt === null || originalPrompt.trim() === "") {
+                new GPTViz.obsidian.Notice(
+                    `GPTViz: no original prompt found in source image for ${candidate.file.name}.`
+                );
+                return;
+            }
+
+            const existingCandidates = GPTViz.getImageCandidates(
+                this.app,
+                activeFile
+            );
+            const predictedNumber = existingCandidates.length > 0
+                ? existingCandidates[existingCandidates.length - 1].number + 1
+                : 1;
+            const predictedCandidateName =
+                `${activeFile.basename}-${predictedNumber}.png`;
+
+            generationStartedAt = Date.now();
+            const estimatedDurationMs =
+                this.lastGenerationDurationMs || 60000;
+
+            progressOwner = progressOwner || this.getCandidateView();
+            if (progressOwner && typeof progressOwner.showProgressOverlay === "function") {
+                progressOwner.showProgressOverlay(() => {
+                    cancelled = true;
+                    progressOwner.hideProgressOverlay();
+                    new GPTViz.obsidian.Notice(
+                        "GPTViz: polishing cancelled."
+                    );
+                }, estimatedDurationMs, predictedCandidateName);
+            }
+
+            const result = await GPTViz.generateOpenAIResponse(
+                apiKey,
+                promptParts.text,
+                loadedImages.imageInputs
+            );
+
+            if (cancelled) {
+                return;
+            }
+
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
+            }
+
+            if (!result.imageBase64) {
+                new GPTViz.ResponseModal(
+                    this.app,
+                    result.text || "The API returned no image."
+                ).open();
+                return;
+            }
+
+            this.lastGenerationDurationMs =
+                Date.now() - generationStartedAt;
+
+            await this.app.vault.createFolder("candidates").catch(() => {});
+
+            const candidates = GPTViz.getImageCandidates(
+                this.app,
+                activeFile
+            );
+            const number = candidates.length > 0
+                ? candidates[candidates.length - 1].number + 1
+                : 1;
+            const candidatePath =
+                `candidates/${activeFile.basename}-${number}.png`;
+            const binary = atob(result.imageBase64);
+            const bytes = new Uint8Array(binary.length);
+
+            for (let index = 0; index < binary.length; index++) {
+                bytes[index] = binary.charCodeAt(index);
+            }
+
+            const pngWithPrompt = GPTViz.embedPromptInPng(
+                bytes.buffer,
+                originalPrompt
+            );
+
+            await this.app.vault.createBinary(
+                candidatePath,
+                pngWithPrompt
+            );
+
+            await this.openCandidateView(candidatePath);
+
+            new GPTViz.obsidian.Notice(
+                `GPTViz: wrote ${candidatePath}`
+            );
+        } catch (error) {
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
+            }
+
+            if (cancelled) {
+                return;
+            }
+
+            this.reportError("polishing an image", error);
+        }
+    }
+
+    async generate(editor, requestedFile, progressView) {
         const section = GPTViz.getPromptSection(editor);
 
         if (!section) {
@@ -579,7 +1424,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             return;
         }
 
-        const activeFile = this.app.workspace.getActiveFile();
+        const activeFile = requestedFile || this.getCurrentMarkdownFile();
 
         if (!activeFile) {
             new GPTViz.obsidian.Notice(
@@ -588,15 +1433,21 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             return;
         }
 
-        let loadingModal = null;
+        const baseName = activeFile.basename;
+        const candidates = GPTViz.getImageCandidates(
+            this.app,
+            activeFile
+        );
+        const number = candidates.length > 0
+            ? candidates[candidates.length - 1].number + 1
+            : 1;
+        const candidateName = `${baseName}-${number}.png`;
+
+        let progressOwner = progressView || this.getCandidateView();
         let cancelled = false;
         let generationStartedAt = 0;
 
         try {
-            new GPTViz.obsidian.Notice(
-                "GPTViz: generating response..."
-            );
-
             const promptParts = GPTViz.getPromptParts(section);
             const loadedImages = await GPTViz.loadPromptImages(
                 this.app,
@@ -614,25 +1465,18 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             const imageInputs = loadedImages.imageInputs;
             generationStartedAt = Date.now();
             const estimatedDurationMs =
-                this.lastGenerationDurationMs || 20000;
+                this.lastGenerationDurationMs || 60000;
 
-            loadingModal = new GPTViz.LoadingModal(
-                this.app,
-                () => {
+            progressOwner = progressOwner || this.getCandidateView();
+            if (progressOwner && typeof progressOwner.showProgressOverlay === "function") {
+                progressOwner.showProgressOverlay(() => {
                     cancelled = true;
-
-                    if (loadingModal) {
-                        loadingModal.close();
-                        loadingModal = null;
-                    }
-
+                    progressOwner.hideProgressOverlay();
                     new GPTViz.obsidian.Notice(
                         "GPTViz: generation cancelled."
                     );
-                },
-                estimatedDurationMs
-            );
-            loadingModal.open();
+                }, estimatedDurationMs, candidateName);
+            }
 
             const result =
                 await GPTViz.generateOpenAIResponse(
@@ -645,8 +1489,9 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 return;
             }
 
-            loadingModal.close();
-            loadingModal = null;
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
+            }
 
             if (!result.imageBase64) {
                 new GPTViz.ResponseModal(
@@ -661,15 +1506,14 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             await this.app.vault.createFolder("candidates").catch(() => {});
 
-            const baseName = activeFile.basename;
-            const candidates = GPTViz.getImageCandidates(
+            const saveCandidates = GPTViz.getImageCandidates(
                 this.app,
                 activeFile
             );
-            const number = candidates.length > 0
-                ? candidates[candidates.length - 1].number + 1
+            const saveNumber = saveCandidates.length > 0
+                ? saveCandidates[saveCandidates.length - 1].number + 1
                 : 1;
-            const path = `candidates/${baseName}-${number}.png`;
+            const candidatePath = `candidates/${activeFile.basename}-${saveNumber}.png`;
             const binary = atob(result.imageBase64);
             const bytes = new Uint8Array(binary.length);
 
@@ -677,57 +1521,31 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 bytes[index] = binary.charCodeAt(index);
             }
 
-            await this.app.vault.createBinary(
-                path,
-                bytes.buffer
+            const pngWithPrompt = GPTViz.embedPromptInPng(
+                bytes.buffer,
+                promptParts.text
             );
 
-            await this.reviewImages();
+            await this.app.vault.createBinary(
+                candidatePath,
+                pngWithPrompt
+            );
+
+            await this.openCandidateView(candidatePath);
 
             new GPTViz.obsidian.Notice(
-                `GPTViz: wrote ${path}`
+                `GPTViz: wrote ${candidatePath}`
             );
         } catch (error) {
-            if (loadingModal) {
-                loadingModal.close();
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
             }
 
             if (cancelled) {
                 return;
             }
 
-            console.error("GPTViz generation error:", error);
-
-            const message =
-                error instanceof Error
-                    ? error.message
-                    : String(error);
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz failed: ${message}`
-            );
-        }
-    }
-
-    async reviewImages() {
-        const activeFile = this.app.workspace.getActiveFile();
-
-        if (!activeFile || activeFile.extension !== "md") {
-            new GPTViz.obsidian.Notice(
-                "GPTViz: no active Markdown file."
-            );
-            return;
-        }
-
-        const hasCandidates = await GPTViz.reviewLatestImage(
-            this.app,
-            activeFile
-        );
-
-        if (!hasCandidates) {
-            new GPTViz.obsidian.Notice(
-                "GPTViz: no image candidates found."
-            );
+            this.reportError("generating an image", error);
         }
     }
 
@@ -741,14 +1559,8 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             return;
         }
 
-        console.log(
-            "GPTViz prompt:",
-            section.text
-        );
-
         const firstLine =
             section.text.split("\n")[0] || "# Prompt";
-
         new GPTViz.obsidian.Notice(
             `GPTViz: found "${firstLine}" (${section.text.length} characters)`
         );

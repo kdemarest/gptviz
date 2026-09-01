@@ -43,3 +43,8 @@ Before and after every code edit:
 - Keep declaration and use consistent; if code uses `this.someElement`, declare and assign `this.someElement`.
 - Prefer simple regular expressions and inspect escaping carefully, especially when writing regexes through an edit tool.
 - After each structural edit, verify the source is syntactically organized before making further changes.
+
+
+## Vault tooling note
+
+The root `.gitignore` is known to contain `*.log`. The vault tools cannot read or edit that hidden file reliably. If inspecting or changing `.gitignore` ever becomes essential, ask the user to do that work.
