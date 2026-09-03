@@ -1,3 +1,12 @@
+## Overview
+
+- Scope: this file defines architecture constraints for gptviz’s generation, candidate-view, and dependency workflows.
+- Source of truth: Markdown prompt content and vault files drive generation and candidate selection behavior.
+- Platform/build: plain JavaScript for Obsidian (Android-compatible), using the existing concat/copy build workflow.
+- Core invariants: one logical Candidate View lifecycle path, explicit refresh/recovery entry points, and fail-loud runtime behavior.
+- Use this doc for plugin boundaries, lifecycle contracts, and implementation invariants.
+
+
 # ARCH.md
 
 GPTViz is a plain-JavaScript Obsidian plugin designed to run on Android.

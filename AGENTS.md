@@ -1,50 +1,38 @@
-# AGENTS.md
+{#include ../SharedProjects.md}
 
-Before editing GPTViz, read:
 
-- `SPEC.md` for required behavior.
-    
-- `ARCH.md` for architecture and implementation constraints.
-    
+Quick context (always load):
+- {#include ARCH.md#Overview}
+- {#include SPEC.md#Overview}
 
-Rules:
+Full-read policy for editing gptviz:
+- Read full ARCH.md for architecture, plugin-load behavior, candidate-view lifecycle, runtime boundaries, or generation/review flow changes.
+- Read full SPEC.md for required behavior, tool contracts, failure policy, test/validation expectations, or Implemented tracking changes.
+- If scope is unclear or quick context is insufficient, read both full files before editing.
 
+Core rules:
 - Make only the requested change.
-    
-- Preserve existing behavior unless the change requires otherwise.
-    
-- Keep the implementation simple.
-    
-- Do not introduce dependencies, frameworks, TypeScript, npm, Node tooling, or new build systems unless explicitly requested.
-    
-- Keep all code Android-compatible with Obsidian mobile.
-    
-- Use Obsidian APIs rather than Node/Electron APIs.
-    
-- Never expose, log, or store API keys outside Obsidian `SecretStorage`.
-    
-- Do not modify `ARCH.md` unless explicitly requested.
+- Preserve behavior unless the request requires change.
+- Keep implementation minimal and practical.
+- Keep code Android-compatible with Obsidian mobile.
+- Use Obsidian APIs, not Node/Electron APIs.
+- Never expose, log, or store API keys outside Obsidian SecretStorage.
+- Update SPEC.md Implemented as needed; do not edit Planned unless explicitly requested.
 
-- As you implement,edit `SPEC.md` Implemented section as needed, but never the Planned section unless explicitly requested.
+Scripts and build workflow:
+- Run scripts as bash script.sh (not ./script.sh).
+- Assume all gptviz .sh scripts run from cwd = gptviz/.
+- Never run bash build.sh (or any build command) without explicit user approval in that same chat turn.
+- If a build is needed, ask first every time; do not auto-build.
 
-Vault visibility:
+Vault visibility constraint:
+- The vault has a plugin that allows opening/editing arbitrary extensions.
+- The vault view does not include anything under .obsidian/; do not assume installed-plugin files there can be read/searched/verified through vault tools.
 
-- The vault view does not include anything under `.obsidian/`. Do not assume installed-plugin files there can be read, searched, or verified through the vault tools.
+Editing hygiene:
+- Prefer narrow replacements/insertions and re-read affected files after multi-step edits.
+- Preserve existing command registrations unless the change requires otherwise.
+- Keep declarations/usages consistent and patterns simple/verified.
 
-
-## Coding Practices
-
-Before and after every code edit:
-
-- Use insertion operations for additions; use exact, narrowly scoped replacements for changes. Never replace a surrounding method signature or command registration unintentionally.
-- Re-read the complete affected file after multi-step edits. Check braces, class boundaries, method signatures, and duplicated top-level blocks.
-- Keep namespace and API initialization before any class or function that references them.
-- When adding commands, verify that all existing command registrations remain present.
-- Keep declaration and use consistent; if code uses `this.someElement`, declare and assign `this.someElement`.
-- Prefer simple regular expressions and inspect escaping carefully, especially when writing regexes through an edit tool.
-- After each structural edit, verify the source is syntactically organized before making further changes.
-
-
-## Vault tooling note
-
-The root `.gitignore` is known to contain `*.log`. The vault tools cannot read or edit that hidden file reliably. If inspecting or changing `.gitignore` ever becomes essential, ask the user to do that work.
+Vault tooling note:
+- The root .gitignore includes *.log and is not reliably editable via vault tools; if that file must change, ask the user to do that step directly.

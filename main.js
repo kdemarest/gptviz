@@ -519,6 +519,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         this.errorModal = null;
         this.polishPromptCache = {};
         this.openCandidateViewPromise = null;
+        this.markdownReviewActionRefreshTimer = null;
 
         this.registerView(
             GPTViz.CANDIDATE_VIEW_TYPE,
@@ -561,19 +562,23 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 this.addMarkdownReviewActions();
             })
         );
+
+        this.registerEvent(
+            this.app.workspace.on("editor-change", () => {
+                this.scheduleMarkdownReviewActionStateRefresh();
+            })
+        );
+
+        this.registerEvent(
+            this.app.metadataCache.on("changed", file => {
+                if (file && file.extension === "md") {
+                    this.updateMarkdownReviewActionStates();
+                }
+            })
+        );
+
         this.addMarkdownReviewActions();
 
-        this.addRibbonIcon(
-            "image",
-            "GPTViz Candidate View",
-            async () => {
-                try {
-                await this.toggleCandidateView();
-            } catch (error) {
-                this.reportError("toggling Candidate View", error);
-            }
-            }
-        );
 
         this.addSettingTab(
             new GPTViz.SettingTab(this.app, this)
@@ -605,6 +610,25 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                     await this.openCandidateView();
                 } catch (error) {
                     this.reportError("opening Candidate View from the command", error);
+                }
+            }
+        });
+
+        this.addCommand({
+            id: "gpt-extract",
+            name: "GPTViz Extract",
+            callback: async () => {
+                try {
+                    await this.extractActiveMarkdown();
+                } catch (error) {
+                    this.reportError("running Extract blocks", error);
+                }
+            },
+            editorCallback: async editor => {
+                try {
+                    await this.extractActiveMarkdown(null, null, { editor });
+                } catch (error) {
+                    this.reportError("running Extract blocks", error);
                 }
             }
         });
@@ -689,6 +713,11 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     onunload() {
         this.removeMarkdownReviewActions();
         this.setCandidateViewActive(false);
+
+        if (this.markdownReviewActionRefreshTimer) {
+            window.clearTimeout(this.markdownReviewActionRefreshTimer);
+            this.markdownReviewActionRefreshTimer = null;
+        }
 
         if (this.errorModal) {
             this.errorModal.close();
@@ -849,8 +878,156 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 .forEach(action => action.remove());
 
             view.containerEl
-                .querySelectorAll('[aria-label="Review images"], [title="Review images"]')
+                .querySelectorAll('[aria-label="Review images"], [title="Review images"], [aria-label="GPTViz Candidate View"], [title="GPTViz Candidate View"]')
                 .forEach(action => action.remove());
+        }
+    }
+
+    markdownFileHasPromptHeading(file) {
+        if (!file || file.extension !== "md") {
+            return false;
+        }
+
+        const cache = this.app.metadataCache.getFileCache(file);
+        const headings = Array.isArray(cache?.headings)
+            ? cache.headings
+            : [];
+
+        return headings.some(heading =>
+            typeof heading?.heading === "string" &&
+            heading.heading.trim().toLowerCase().startsWith("prompt")
+        );
+    }
+
+
+    markdownFileHasKeptImage(file) {
+        if (!file || file.extension !== "md") {
+            return false;
+        }
+
+        const keptFile = this.app.vault.getAbstractFileByPath(
+            `${file.basename}.png`
+        );
+
+        return Boolean(keptFile && keptFile.extension === "png");
+    }
+
+    markdownFileHasAnyCandidate(file) {
+        if (!file || file.extension !== "md") {
+            return false;
+        }
+
+        const prefix = `${file.basename}-`;
+
+        for (const vaultFile of this.app.vault.getFiles()) {
+            if (
+                vaultFile.path.startsWith("candidates/") &&
+                vaultFile.extension === "png" &&
+                vaultFile.name.startsWith(prefix)
+            ) {
+                const numberText = vaultFile.name.slice(prefix.length, -4);
+
+                if (/^[0-9]+$/.test(numberText)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    markdownFileCanOpenCandidateView(file) {
+        return this.markdownFileHasPromptHeading(file) ||
+            this.markdownFileHasKeptImage(file) ||
+            this.markdownFileHasAnyCandidate(file);
+    }
+
+    setMarkdownReviewActionEnabled(actionEl, enabled) {
+        if (!actionEl) {
+            return;
+        }
+
+        if (enabled) {
+            actionEl.classList.remove("is-disabled");
+            actionEl.removeAttribute("aria-disabled");
+            actionEl.style.pointerEvents = "";
+            actionEl.style.opacity = "";
+            return;
+        }
+
+        actionEl.classList.add("is-disabled");
+        actionEl.setAttribute("aria-disabled", "true");
+        actionEl.style.pointerEvents = "none";
+        actionEl.style.opacity = "0.45";
+    }
+
+    scheduleMarkdownReviewActionStateRefresh() {
+        if (this.markdownReviewActionRefreshTimer) {
+            window.clearTimeout(this.markdownReviewActionRefreshTimer);
+        }
+
+        this.markdownReviewActionRefreshTimer = window.setTimeout(() => {
+            this.markdownReviewActionRefreshTimer = null;
+            this.updateMarkdownReviewActionStates();
+        }, 200);
+    }
+
+    updateMarkdownReviewActionStates() {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+
+            if (
+                !(view instanceof GPTViz.obsidian.MarkdownView) ||
+                !view.file
+            ) {
+                continue;
+            }
+
+            const reviewEnabled = this.markdownFileCanOpenCandidateView(view.file);
+            const reviewActions = view.containerEl.querySelectorAll(
+                `.${this.markdownReviewActionClass}`
+            );
+            reviewActions.forEach(action => {
+                this.setMarkdownReviewActionEnabled(action, reviewEnabled);
+            });
+
+
+        }
+    }
+
+    enforceMarkdownActionOrder(view) {
+        if (!view || !view.containerEl) {
+            return;
+        }
+
+        const actionsEl = view.containerEl.querySelector(".view-actions");
+        if (!actionsEl) {
+            return;
+        }
+
+        const reviewActionEl = actionsEl.querySelector(
+            `.${this.markdownReviewActionClass}`
+        );
+
+        if (!reviewActionEl) {
+            return;
+        }
+
+        const systemToggler = actionsEl.querySelector(
+            '.view-action.mod-source-view, .view-action[aria-label*="Source mode"], .view-action[aria-label*="Live Preview"], .view-action[aria-label*="Reading view"], .view-action[aria-label*="Edit mode"]'
+        );
+        const optionsActionEl = actionsEl.querySelector(
+            '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
+        );
+
+        if (systemToggler) {
+            actionsEl.insertBefore(reviewActionEl, systemToggler.nextSibling);
+        } else {
+            actionsEl.appendChild(reviewActionEl);
+        }
+
+        if (optionsActionEl) {
+            actionsEl.appendChild(optionsActionEl);
         }
     }
 
@@ -860,37 +1037,50 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             if (
                 !(view instanceof GPTViz.obsidian.MarkdownView) ||
-                !view.file ||
-                this.markdownReviewActions.has(view)
+                !view.file
             ) {
                 continue;
             }
 
             const existingActions = view.containerEl.querySelectorAll(
-                `.${this.markdownReviewActionClass}, [aria-label="Review images"], [title="Review images"]`
+                `.${this.markdownReviewActionClass}, [aria-label="Review images"], [title="Review images"], [aria-label="GPTViz Candidate View"], [title="GPTViz Candidate View"]`
             );
             existingActions.forEach(action => action.remove());
 
-            const action = view.addAction(
+            if (typeof view.addAction !== "function") {
+                continue;
+            }
+
+            const reviewActionEl = view.addAction(
                 "image",
-                "Review images",
+                "GPTViz Candidate View",
                 async () => {
+                    if (!this.markdownFileCanOpenCandidateView(view.file)) {
+                        return;
+                    }
+
                     try {
                         await this.openCandidateView(null, leaf);
                     } catch (error) {
                         this.reportError(
-                            "opening Candidate View from the Markdown image action",
+                            "handling the Markdown image action",
                             error
                         );
                     }
                 }
             );
 
-            if (action) {
-                action.classList.add(this.markdownReviewActionClass);
-                action.dataset.gptvizReviewImages = "true";
+            if (reviewActionEl) {
+                reviewActionEl.classList.add(this.markdownReviewActionClass);
+                reviewActionEl.setAttribute("aria-label", "GPTViz Candidate View");
+                reviewActionEl.setAttribute("title", "GPTViz Candidate View");
+                this.setMarkdownReviewActionEnabled(
+                    reviewActionEl,
+                    this.markdownFileCanOpenCandidateView(view.file)
+                );
             }
-            this.markdownReviewActions.add(view);
+
+            this.enforceMarkdownActionOrder(view);
         }
     }
 
@@ -1546,6 +1736,368 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             }
 
             this.reportError("generating an image", error);
+        }
+    }
+
+    extractFirstJsonObject(text) {
+        const raw = String(text || "").trim();
+        if (!raw) {
+            throw new Error("Empty model response.");
+        }
+
+        try {
+            return JSON.parse(raw);
+        } catch (error) {}
+
+        const start = raw.indexOf("{");
+        const end = raw.lastIndexOf("}");
+        if (start === -1 || end === -1 || end <= start) {
+            throw new Error(`Model response did not contain JSON: ${raw}`);
+        }
+
+        const jsonText = raw.slice(start, end + 1);
+        return JSON.parse(jsonText);
+    }
+
+    parseMarkModelResponse(text, expectedName, filePath, line) {
+        const parsed = this.extractFirstJsonObject(text);
+        const name = String(parsed.name || expectedName || "").trim();
+        const x = Number(parsed.x);
+        const y = Number(parsed.y);
+
+        if (!name) {
+            throw new Error(
+                `Mark parse error at ${filePath}:${line} - Model response missing 'name'.`
+            );
+        }
+
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            throw new Error(
+                `Mark parse error at ${filePath}:${line} - Model response missing numeric x/y.`
+            );
+        }
+
+        if (x < 0 || x > 1 || y < 0 || y > 1) {
+            throw new Error(
+                `Mark parse error at ${filePath}:${line} - Coordinates out of range (x=${x}, y=${y}). Expected 0..1.`
+            );
+        }
+
+        const out = {
+            name,
+            x,
+            y
+        };
+
+        if (parsed.confidence !== undefined) {
+            const confidence = Number(parsed.confidence);
+            if (Number.isFinite(confidence)) {
+                out.confidence = confidence;
+            }
+        }
+
+        if (parsed.bbox && typeof parsed.bbox === "object") {
+            const bbox = {
+                x: Number(parsed.bbox.x),
+                y: Number(parsed.bbox.y),
+                w: Number(parsed.bbox.w),
+                h: Number(parsed.bbox.h)
+            };
+            if (
+                Number.isFinite(bbox.x) &&
+                Number.isFinite(bbox.y) &&
+                Number.isFinite(bbox.w) &&
+                Number.isFinite(bbox.h)
+            ) {
+                out.bbox = bbox;
+            }
+        }
+
+        return out;
+    }
+
+    async getMarkBlocksForFile(file) {
+        const text = await this.app.vault.cachedRead(file);
+        return GPTViz.parseMarkBlocksFromText(text, file.path);
+    }
+
+    async hasMarkBlocksForFile(file) {
+        const blocks = await this.getMarkBlocksForFile(file);
+        return blocks.length > 0;
+    }
+
+    async getExtractBlocksForFile(file) {
+        const text = await this.app.vault.cachedRead(file);
+        return GPTViz.parseExtractBlocksFromText(text, file.path);
+    }
+
+    async hasExtractBlocksForFile(file) {
+        const blocks = await this.getExtractBlocksForFile(file);
+        return blocks.length > 0;
+    }
+
+    async ensureParentFolders(path) {
+        const segments = String(path || "").split("/").filter(Boolean);
+        if (segments.length <= 1) {
+            return;
+        }
+
+        let current = "";
+        for (let index = 0; index < segments.length - 1; index++) {
+            current = current
+                ? `${current}/${segments[index]}`
+                : segments[index];
+            await this.app.vault.createFolder(current).catch(() => {});
+        }
+    }
+
+    async writeBinaryOverwrite(path, binary) {
+        const existing = this.app.vault.getAbstractFileByPath(path);
+
+        if (existing && existing.extension) {
+            await this.app.vault.modifyBinary(existing, binary);
+            return;
+        }
+
+        await this.app.vault.createBinary(path, binary);
+    }
+
+    async extractActiveMarkdown(file, candidateView, options) {
+        const activeFile = file || this.getCurrentMarkdownFile();
+        if (!activeFile) {
+            throw new Error("No active Markdown file for Extract operation.");
+        }
+
+        const secretName = this.settings.apiKeySecret;
+        const apiKey = secretName
+            ? this.app.secretStorage.getSecret(secretName)
+            : "";
+
+        if (!apiKey) {
+            new GPTViz.obsidian.Notice(
+                secretName
+                    ? "GPTViz: API key not found."
+                    : "GPTViz: API key not configured."
+            );
+            return;
+        }
+
+        const blocks = await this.getExtractBlocksForFile(activeFile);
+        if (blocks.length === 0) {
+            new GPTViz.obsidian.Notice("GPTViz: no # Extract sections found.");
+            return;
+        }
+
+        let blocksToRun = blocks;
+        const editor = options && options.editor;
+
+        if (editor && typeof editor.getCursor === "function") {
+            const cursorLine = editor.getCursor().line;
+            const blockAtCursor = blocks.find(block =>
+                cursorLine >= block.startLine &&
+                cursorLine < block.endLine
+            );
+
+            if (blockAtCursor) {
+                blocksToRun = [blockAtCursor];
+            }
+        }
+
+        let progressOwner = candidateView || this.getCandidateView();
+        let cancelled = false;
+        const estimatedDurationMs = Math.max(10000, blocksToRun.length * 14000);
+        const progressName = blocksToRun.length === 1
+            ? blocksToRun[0].asset
+            : `${activeFile.basename}.extract`;
+
+        if (progressOwner && typeof progressOwner.showProgressOverlay === "function") {
+            progressOwner.showProgressOverlay(() => {
+                cancelled = true;
+                progressOwner.hideProgressOverlay();
+                new GPTViz.obsidian.Notice("GPTViz: extract cancelled.");
+            }, estimatedDurationMs, progressName);
+        }
+
+        try {
+            const writtenAssets = [];
+
+            for (const block of blocksToRun) {
+                if (cancelled) {
+                    return;
+                }
+
+                const sourceName = block.source || `${activeFile.basename}.png`;
+                const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
+
+                if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
+                    throw new Error(
+                        `Extract source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                    );
+                }
+
+                const response = await GPTViz.generateOpenAIImageResponseDetailed(
+                    apiKey,
+                    block.prompt,
+                    loaded.imageInputs
+                );
+
+                if (cancelled) {
+                    return;
+                }
+
+                if (!response.imageBase64s || response.imageBase64s.length === 0) {
+                    throw new Error(
+                        `Extract generation error at ${activeFile.path}:${block.line} - missing AI image payload.`
+                    );
+                }
+
+                if (response.imageBase64s.length > 1) {
+                    new GPTViz.obsidian.Notice(
+                        `GPTViz: multiple images returned for ${block.asset}; using the first.`
+                    );
+                }
+
+                const rawPng = GPTViz.base64ToArrayBuffer(response.imageBase64s[0]);
+                const outputPng = await GPTViz.removeKeyColorFromPng(rawPng);
+
+                await this.ensureParentFolders(block.asset);
+                await this.writeBinaryOverwrite(block.asset, outputPng);
+                writtenAssets.push(block.asset);
+            }
+
+            if (writtenAssets.length > 0) {
+                const summary = writtenAssets.length <= 3
+                    ? writtenAssets.join(", ")
+                    : `${writtenAssets.slice(0, 3).join(", ")} +${writtenAssets.length - 3} more`;
+                new GPTViz.obsidian.Notice(
+                    `GPTViz: wrote ${writtenAssets.length} extract${writtenAssets.length === 1 ? "" : "s"}: ${summary}`
+                );
+            }
+        } finally {
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
+            }
+        }
+    }
+
+    async markActiveMarkdown(file, candidateView) {
+        const activeFile = file || this.getCurrentMarkdownFile();
+        if (!activeFile) {
+            throw new Error("No active Markdown file for Mark operation.");
+        }
+
+        const secretName = this.settings.apiKeySecret;
+        const apiKey = secretName
+            ? this.app.secretStorage.getSecret(secretName)
+            : "";
+
+        if (!apiKey) {
+            new GPTViz.obsidian.Notice(
+                secretName
+                    ? "GPTViz: API key not found."
+                    : "GPTViz: API key not configured."
+            );
+            return;
+        }
+
+        const blocks = await this.getMarkBlocksForFile(activeFile);
+        if (blocks.length === 0) {
+            new GPTViz.obsidian.Notice("GPTViz: no # Mark sections found.");
+            return;
+        }
+
+        let progressOwner = candidateView || this.getCandidateView();
+        let cancelled = false;
+        const estimatedDurationMs = Math.max(10000, blocks.length * 12000);
+
+        if (progressOwner && typeof progressOwner.showProgressOverlay === "function") {
+            progressOwner.showProgressOverlay(() => {
+                cancelled = true;
+                progressOwner.hideProgressOverlay();
+                new GPTViz.obsidian.Notice("GPTViz: marking cancelled.");
+            }, estimatedDurationMs, `${activeFile.basename}.marks.json`);
+        }
+
+        try {
+            const marks = [];
+
+            for (const block of blocks) {
+                if (cancelled) {
+                    return;
+                }
+
+                const sourceName = block.source || `${activeFile.basename}.png`;
+                const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
+                if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
+                    throw new Error(
+                        `Mark source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                    );
+                }
+
+                const prompt = [
+                    "Find one target point in the image.",
+                    `Target name: ${block.name}`,
+                    "Return only strict JSON with this exact shape:",
+                    '{"name":"<name>","x":0.5,"y":0.5,"confidence":0.0,"bbox":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}',
+                    "Rules:",
+                    "- x and y are normalized coordinates from 0 to 1.",
+                    "- (0,0) is top-left, (1,1) is bottom-right.",
+                    "- Use the exact target name.",
+                    "Task:",
+                    block.prompt
+                ].join("\n");
+
+                const responseText = await GPTViz.generateOpenAITextResponse(
+                    apiKey,
+                    prompt,
+                    loaded.imageInputs
+                );
+
+                if (cancelled) {
+                    return;
+                }
+
+                const point = this.parseMarkModelResponse(
+                    responseText,
+                    block.name,
+                    activeFile.path,
+                    block.line
+                );
+
+                marks.push({
+                    name: point.name,
+                    source: sourceName,
+                    x: point.x,
+                    y: point.y,
+                    confidence: point.confidence,
+                    bbox: point.bbox,
+                    line: block.line,
+                    prompt: block.prompt
+                });
+            }
+
+            const payload = {
+                file: activeFile.path,
+                updatedAt: new Date().toISOString(),
+                marks
+            };
+            const sidecarPath = `${activeFile.basename}.marks.json`;
+            await this.app.vault.adapter.write(
+                sidecarPath,
+                JSON.stringify(payload, null, 2)
+            );
+
+            if (candidateView && typeof candidateView.setMarks === "function") {
+                await candidateView.setMarks(marks);
+            }
+
+            new GPTViz.obsidian.Notice(
+                `GPTViz: wrote ${marks.length} mark${marks.length === 1 ? "" : "s"} to ${sidecarPath}`
+            );
+        } finally {
+            if (progressOwner && typeof progressOwner.hideProgressOverlay === "function") {
+                progressOwner.hideProgressOverlay();
+            }
         }
     }
 

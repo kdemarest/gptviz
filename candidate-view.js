@@ -11,6 +11,9 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.index = 0;
         this.imageUrl = null;
         this.refreshQueue = Promise.resolve();
+        this.markPoints = [];
+        this.hasMarkBlocks = false;
+        this.hasExtractBlocks = false;
     }
 
     getViewType() {
@@ -259,9 +262,10 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
     }
 
     createGenerateButton(parent) {
-        const button = parent.createEl("button", {
-            text: "Generate"
-        });
+        const button = parent.createEl("button");
+        button.setAttribute("aria-label", "Generate image");
+        button.setAttribute("title", "Generate image");
+        GPTViz.obsidian.setIcon(button, "plus");
         button.addEventListener("click", async () => {
             try {
                 await this.plugin.generateActiveMarkdown(this.activeFile, this);
@@ -303,6 +307,9 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
         const activeFile = this.plugin.getCurrentMarkdownFile();
         this.activeFile = activeFile;
+        this.markPoints = [];
+        this.hasMarkBlocks = false;
+        this.hasExtractBlocks = false;
 
         if (this.plugin.debug) {
             this.plugin.debug(`view refresh file=${activeFile ? activeFile.path : "<none>"}`);
@@ -316,6 +323,9 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             return;
         }
 
+        this.hasMarkBlocks = await this.plugin.hasMarkBlocksForFile(activeFile);
+        this.hasExtractBlocks = await this.plugin.hasExtractBlocksForFile(activeFile);
+
         this.candidates = await GPTViz.ensureKeptImageCandidate(
             this.app,
             activeFile
@@ -326,37 +336,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         }
 
         if (this.candidates.length === 0) {
-            const titleRow = contentEl.createEl("div");
-            titleRow.style.display = "flex";
-            titleRow.style.alignItems = "center";
-            titleRow.style.gap = "0.5em";
-            titleRow.style.marginBottom = "0.5em";
-
-            const markdownButton = titleRow.createEl("button", {
-                text: "<"
-            });
-            markdownButton.style.minWidth = "3em";
-            markdownButton.style.fontSize = "1.25em";
-            markdownButton.style.fontWeight = "700";
-            markdownButton.style.lineHeight = "1";
-            markdownButton.addEventListener("click", async () => {
-                try {
-                    const markdownLeaf = this.app.workspace
-                        .getLeavesOfType("markdown")
-                        .find(leaf => leaf.view.file?.path === this.activeFile.path);
-
-                    if (markdownLeaf) {
-                        await this.app.workspace.revealLeaf(markdownLeaf);
-                    } else {
-                        await this.app.workspace.getLeaf(true).openFile(
-                            this.activeFile
-                        );
-                    }
-                } catch (error) {
-                    this.plugin.reportError("returning to the Markdown note", error);
-                }
-            });
-
             contentEl.createEl("div", {
                 text: `No candidates for ${activeFile.name}.`
             });
@@ -384,13 +363,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         titleRow.style.gap = "0.5em";
         titleRow.style.marginBottom = "0.5em";
 
-        const markdownButton = titleRow.createEl("button", {
-            text: "<"
-        });
+        const markdownButton = titleRow.createEl("button");
+        markdownButton.setAttribute("aria-label", "Return to note");
+        markdownButton.setAttribute("title", "Return to note");
+        GPTViz.obsidian.setIcon(markdownButton, "file-text");
         markdownButton.style.minWidth = "3em";
-        markdownButton.style.fontSize = "1.25em";
-        markdownButton.style.fontWeight = "700";
-        markdownButton.style.lineHeight = "1";
         markdownButton.addEventListener("click", async () => {
             try {
                 const markdownLeaf = this.app.workspace
@@ -416,9 +393,10 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         titleRow.style.width = "100%";
         const titleSpacer = titleRow.createEl("div");
         titleSpacer.style.flex = "1";
-        this.polishButton = titleRow.createEl("button", {
-            text: "Polish"
-        });
+        this.polishButton = titleRow.createEl("button");
+        this.polishButton.setAttribute("aria-label", "Polish image");
+        this.polishButton.setAttribute("title", "Polish image");
+        GPTViz.obsidian.setIcon(this.polishButton, "pencil");
         this.polishButton.style.display = "none";
         this.polishButton.addEventListener("click", async () => {
             try {
@@ -433,6 +411,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         imageContainer.style.display = "flex";
         imageContainer.style.alignItems = "center";
         imageContainer.style.justifyContent = "center";
+        imageContainer.style.position = "relative";
 
         this.imageEl = imageContainer.createEl("img", {
             attr: {
@@ -444,6 +423,12 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.imageEl.style.objectFit = "contain";
         this.imageEl.style.touchAction = "none";
         this.imageEl.style.transformOrigin = "center center";
+
+        this.markLayerEl = imageContainer.createEl("div");
+        this.markLayerEl.style.position = "absolute";
+        this.markLayerEl.style.inset = "0";
+        this.markLayerEl.style.pointerEvents = "none";
+        this.markLayerEl.style.zIndex = "2";
 
         let zoomScale = 1;
         let imageOffsetX = 0;
@@ -486,6 +471,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             );
             this.imageEl.style.transform =
                 `translate(${imageOffsetX}px, ${imageOffsetY}px) scale(${zoomScale})`;
+            this.renderMarkDots();
         };
         const applyZoom = scale => {
             zoomScale = Math.max(1, scale);
@@ -587,15 +573,25 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         navigation.style.display = "flex";
         navigation.style.gap = "0.5em";
 
-        this.prevButton = navigation.createEl("button", {
-            text: "Prev"
-        });
-        this.nextButton = navigation.createEl("button", {
-            text: "Next"
-        });
+        this.prevButton = navigation.createEl("button");
+        this.prevButton.setAttribute("aria-label", "Previous image");
+        this.prevButton.setAttribute("title", "Previous image");
+        GPTViz.obsidian.setIcon(this.prevButton, "chevron-left");
+        this.nextButton = navigation.createEl("button");
+        this.nextButton.setAttribute("aria-label", "Next image");
+        this.nextButton.setAttribute("title", "Next image");
+        GPTViz.obsidian.setIcon(this.nextButton, "chevron-right");
         this.keepButton = navigation.createEl("button", {
             text: "Keep"
         });
+        this.markButton = navigation.createEl("button", {
+            text: "Mark"
+        });
+        this.markButton.style.display = "none";
+        this.extractButton = navigation.createEl("button", {
+            text: "Extract"
+        });
+        this.extractButton.style.display = "none";
         this.generateButton = this.createGenerateButton(controls);
 
         this.prevButton.addEventListener("click", async () => {
@@ -628,6 +624,22 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
         });
 
+        this.markButton.addEventListener("click", async () => {
+            try {
+                await this.plugin.markActiveMarkdown(this.activeFile, this);
+            } catch (error) {
+                this.plugin.reportError("marking target positions", error);
+            }
+        });
+
+        this.extractButton.addEventListener("click", async () => {
+            try {
+                await this.plugin.extractActiveMarkdown(this.activeFile, this);
+            } catch (error) {
+                this.plugin.reportError("extracting image assets", error);
+            }
+        });
+
         await this.renderCurrentImage();
 
         if (this.plugin.debug) {
@@ -646,6 +658,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.imageUrl = URL.createObjectURL(
             new Blob([binary], { type: "image/png" })
         );
+        this.imageEl.onload = () => this.renderMarkDots();
         this.imageEl.src = this.imageUrl;
 
         this.prevButton.disabled = this.index === 0;
@@ -672,6 +685,35 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.keepButton.style.color = isKept
             ? "var(--color-green)"
             : "";
+
+        const showMarkButton = Boolean(isKept && this.hasMarkBlocks);
+        this.markButton.style.display = showMarkButton ? "" : "none";
+        this.markButton.disabled = !showMarkButton;
+
+        const showExtractButton = Boolean(isKept && this.hasExtractBlocks);
+        this.extractButton.style.display = showExtractButton ? "" : "none";
+        this.extractButton.disabled = !showExtractButton;
+
+        if (!showMarkButton) {
+            this.markPoints = [];
+            this.renderMarkDots();
+        }
+
+        if (showMarkButton) {
+            const sidecarPath = `${this.activeFile.basename}.marks.json`;
+            try {
+                if (await this.app.vault.adapter.exists(sidecarPath)) {
+                    const text = await this.app.vault.adapter.read(sidecarPath);
+                    const data = JSON.parse(text);
+                    this.markPoints = Array.isArray(data.marks) ? data.marks : [];
+                } else {
+                    this.markPoints = [];
+                }
+            } catch (error) {
+                this.markPoints = [];
+            }
+        }
+
         this.polishButton.style.display = "";
         this.polishButton.disabled = false;
         this.candidateTitleEl.textContent = isKept
@@ -680,6 +722,79 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.candidateTitleEl.style.color = isKept
             ? "var(--color-green)"
             : "";
+
+        this.renderMarkDots();
+    }
+
+    async setMarks(marks) {
+        this.markPoints = Array.isArray(marks) ? marks : [];
+        this.renderMarkDots();
+    }
+
+    renderMarkDots() {
+        if (!this.markLayerEl) {
+            return;
+        }
+
+        this.markLayerEl.empty();
+
+        if (!Array.isArray(this.markPoints) || this.markPoints.length === 0) {
+            return;
+        }
+
+        const container = this.markLayerEl;
+        const containerRect = container.getBoundingClientRect();
+        const imageRect = this.imageEl
+            ? this.imageEl.getBoundingClientRect()
+            : null;
+
+        if (
+            !imageRect ||
+            imageRect.width <= 0 ||
+            imageRect.height <= 0 ||
+            containerRect.width <= 0 ||
+            containerRect.height <= 0
+        ) {
+            return;
+        }
+
+        const imageLeft = imageRect.left - containerRect.left;
+        const imageTop = imageRect.top - containerRect.top;
+        const imageWidth = imageRect.width;
+        const imageHeight = imageRect.height;
+
+        for (const mark of this.markPoints) {
+            const x = Number(mark.x);
+            const y = Number(mark.y);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                continue;
+            }
+
+            const dot = container.createEl("div");
+            dot.style.position = "absolute";
+            dot.style.left = `${imageLeft + x * imageWidth}px`;
+            dot.style.top = `${imageTop + y * imageHeight}px`;
+            dot.style.width = "22px";
+            dot.style.height = "22px";
+            dot.style.borderRadius = "50%";
+            dot.style.transform = "translate(-50%, -50%)";
+            dot.style.background = "rgba(255, 0, 255, 0.9)";
+            dot.style.border = "2px solid white";
+            dot.style.boxShadow = "0 0 0 2px rgba(0,0,0,0.5)";
+
+            const label = container.createEl("div", {
+                text: String(mark.name || "")
+            });
+            label.style.position = "absolute";
+            label.style.left = `${imageLeft + x * imageWidth + 14}px`;
+            label.style.top = `${imageTop + y * imageHeight - 14}px`;
+            label.style.padding = "2px 6px";
+            label.style.fontSize = "12px";
+            label.style.fontWeight = "700";
+            label.style.background = "rgba(0,0,0,0.65)";
+            label.style.color = "white";
+            label.style.borderRadius = "8px";
+        }
     }
 
     async keepCurrentImage() {

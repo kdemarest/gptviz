@@ -1,56 +1,96 @@
+## Overview
+
+- Scope: this spec defines required gptviz behavior and tracks local implementation status.
+- Workflow: keep changes minimal, preserve behavior unless requested, and record shipped work under Implemented.
+- Constraint: update Implemented while implementing; do not edit Planned unless explicitly requested.
+- Runtime priorities: deterministic prompt/candidate workflows, strict fail-loud error handling, and Android-compatible Obsidian operation.
+- Use this doc to validate required behavior, current delivery state, and remaining planned surface.
+
+## Usage
+
+This spec is optimized for AI runtime context efficiency.
+
+- Keep ## Implemented concise and contract-focused.
+- Keep ## Planned detailed and design-focused.
+
+Implemented update rules:
+
+- Record capability-level outcomes, not implementation narrative/history.
+- Include only behavior constraints/invariants needed to prevent regressions.
+- Prefer short bullets over long prose.
+- When helpful, include brief code pointers (file/function) instead of duplicating code behavior.
+- Avoid restating behavior that is obvious from nearby code unless it is easy to regress.
+
+Planned update rules:
+
+- Keep full behavioral detail, data shapes, error expectations, and non-goals.
+- Treat Planned as the authoritative intent for future implementation.
+
+Goal: minimize token cost while preserving enough contract detail for safe future edits.
+
 ## Implemented
 
-### Failure presentation
+### Failure and logging contracts
 
-GPTViz is a single-user developer tool and fails loudly. Any catastrophic failure in an image action, Candidate View operation, command, refresh, or reload recovery is shown as a blocking full-screen error surface in the active Obsidian workspace. The surface identifies the failed operation, shows the error message and stack when available, and remains visible until the user taps a Clear/Dismiss button. Errors never auto-dismiss, time out, or disappear silently; they are also logged with `console.error()`.
+- Catastrophic failures are fail-loud: GPTViz shows a blocking error surface and logs details to `console.error()`.
+- Each plugin load appends a run marker to `gptviz.log`.
+- Reported runtime errors append timestamp, operation, message, and stack (when available) to `gptviz.log`.
 
-### Runtime logging
+### Project-local watcher isolation
 
-Each plugin load appends a new run marker to the vault-root gptviz.log file: a blank line, the run date/time, and a blank line. Each reported error is appended with its timestamp, operation, message, and stack when available. Runtime log files are ignored by Git.
+- Optional RunBash watcher is project-local to gptviz:
+  - scripts: `gptviz/watch-runbash.sh`, `gptviz/start-watcher.sh`, `gptviz/stop-watcher.sh`
+  - files: `gptviz/RunBash.ai`, `gptviz/RunBash.log`, `gptviz/RunBash.last.log`, `gptviz/.runbash-watcher.heartbeat`
 
-- **GPT connect** — verifies the configured OpenAI API connection.
-- **GPT show prompt** — finds the current Markdown `Prompt` section and reports it.
-- **GPTViz Image Integrity** — scans every Markdown file for `Images:`/`Photos:` references, Obsidian image embeds, Markdown image tags, and HTML image tags. It lists each Markdown file containing a reference that cannot be resolved to a file in the vault, along with the invalid references. Tapping a listed filename opens that Markdown file.
-- **GPTViz Generate Image** — sends the current Markdown `Prompt` section, including any referenced images from an `Images:` line, to the OpenAI image-generation tool and writes a successful image result to a new candidate PNG. The exact prompt sent with the request is embedded in the returned PNG as UTF-8 metadata. When generation is started from Candidate View, it shows a view-local absolute progress overlay with a spinner, elapsed-time indicator, and Cancel button. The overlay has no backdrop and does not block the rest of the tab. Cancellation removes the overlay, prevents the result from being saved, and does not consume a candidate number. After a successful image is saved, it refreshes the persistent Candidate View and shows the new candidate.
-- **GPTViz Review Images** — reveals the persistent Candidate View for the current Markdown file. The view includes Generate, the current candidate image and filename, Prev, Next, Keep, and Polish controls. Prev is disabled on the first image, Next is disabled on the last image, and Keep is disabled and reads Kept when the current image matches the root-level kept image. Keep promotes the selected candidate while preserving its creation and modification timestamps on the root-level image. If the root-level kept image is not represented in `candidates/`, GPTViz embeds the current initial Prompt into the kept image, preserves the kept image’s original creation and modification timestamps, and then creates a candidate copy with the updated image and those same timestamps. Polish is enabled for every candidate. It uses a persistent, non-modal in-view overlay over the candidate image. The overlay contains a scrollable text box and a single right-justified `Run` button; the text is cached in memory per main Markdown filename for the current plugin session. When the overlay is first opened, if that file’s cached text is blank, GPTViz immediately reads the vault-root `_polish.md` contents and places them into the text box and cache. The Polish button remains accessible above the overlay: tapping it while the overlay is visible hides the overlay without clearing the text, and tapping it again shows it. Before execution, every `[[self]]` token in the cached or entered text is replaced with the selected candidate source image filename. The resolved `Images:` line is parsed for image inputs; paths may include subdirectories such as `candidates/filename.png`, and names without an extension use `.png`. When no `Images:` line is present, the selected candidate is used as the source image. The resolved text without the `Images:` line is sent as the image prompt, without reading or parsing any Markdown Polish section. The generated candidate embeds only the original prompt found in the actual source image input; the entered Polish text is not embedded. If the source image has no embedded original prompt, GPTViz reports that condition and does not create a candidate. Polish uses the same progress overlay and cancellation behavior as Generate. The view can be toggled with the GPTViz ribbon button, which returns to the Markdown leaf that was active before the view was opened. Candidate View uses one workspace leaf, stores no viewing state or metadata, and refreshes when the active Markdown file changes without repeating a refresh when it already represents that file.
-- **GPTViz Check Dependencies** — scans every Markdown file’s Prompt sections for `Images:` references. It compares each referenced image with the note’s root-level generated PNG and displays stale or missing dependencies in a scrollable modal. Tapping a listed note opens its companion Markdown file.
+### Commands and user-visible capabilities
 
-A prompt starts at a Markdown heading whose text begins with `Prompt`.
+- `GPT connect`: verifies configured OpenAI API connectivity.
+- `GPT show prompt`: resolves and reports the active Prompt section.
+- `GPTViz Image Integrity`: reports unresolved image references across markdown files.
+- `GPTViz Generate Image`: generates a new candidate image from Prompt (+ optional `Images:` inputs), supports in-view progress + cancel, embeds exact sent prompt in PNG metadata, and refreshes Candidate View on success.
+- `GPTViz Review Images`: opens persistent Candidate View with prev/next, keep, generate, polish, and markdown return controls; keeps state lightweight and avoids duplicate action registrations.
+- `GPTViz Check Dependencies`: reports stale/missing prompt-image dependencies.
+- `GPTViz Mark (v0)`: parses `# Mark` blocks, requests normalized point JSON, writes `<basename>.marks.json`, and overlays labeled points on the kept image.
+- `GPTViz Extract (v0)`: parses `# Extract` blocks, runs image-edit generation using source image + extract prompt, removes keyed background color to alpha, and writes/overwrites each `Asset:` PNG target; from editor context, it runs only the block under the cursor when inside a `# Extract` block.
 
-The section ends at the next heading of the same or higher level.
+### Prompt, image input, and candidate contracts
 
-If no Prompt heading exists above the cursor, the first Prompt section in the file is used.
+- Prompt resolution:
+  - starts at heading text beginning with `Prompt`
+  - ends at next heading of same or higher level
+  - if cursor is not inside a Prompt section, uses first Prompt section in file
+- Candidate numbering is file-derived only: next number is max existing PNG index in `candidates/` + 1; no stored counter.
+- Non-image API responses are shown to the user (text or readable JSON), do not save files, and do not consume candidate numbers.
+- `Images:` supports comma-separated root paths and `candidates/` paths; extensionless names default to `.png`; warnings are aggregated and block request execution.
+- `Photos:` in Prompt is deprecated and blocks generation with a deprecation warning.
 
-Successful image results are decoded from base64 and saved as PNG files under `candidates/`, using the current Markdown file’s base name and a number one greater than the highest existing PNG candidate number. Candidate numbering is derived only from files in `candidates/`; GPTViz stores no counter or candidate metadata.
+### Keep and Polish contracts
 
-If the API returns text instead of an image, including a refusal or other complaint, GPTViz displays that text in a modal and does not create a candidate file. Unexpected non-image responses are also displayed in the modal as readable JSON. A non-image response does not consume a candidate number.
-
-An optional `Images:` line in the Prompt section contains comma-separated image names. Images are loaded from the project root; names without an extension use `.png`. Candidate paths under `candidates/` are also supported. The line is removed from the textual prompt, and supported images are sent as image inputs. GPTViz collects all missing, unreadable, or unsupported image warnings, displays them together in a modal, and does not show the spinner or send an image-generation request when any warning exists.
-
-The Candidate View compares the candidate’s embedded prompt with the current initial Markdown prompt when Keep is tapped. If the candidate has no embedded prompt or its embedded prompt is blank, GPTViz embeds the current initial Markdown prompt into the candidate before keeping it, preserving the candidate’s timestamps. If a nonblank embedded prompt differs, GPTViz asks whether to align the Markdown prompt to the image prompt, with Yes, No, and Cancel choices. Yes replaces only the initial prompt text. No keeps the image without changing the Markdown file; Cancel aborts Keep.
-
-A `Photos:` line is deprecated in favor of `Images:`. If a Prompt section contains `Photos:`, GPTViz displays a deprecation warning and does not send an image-generation request.
+- Keep preserves timestamps when promoting a candidate to the root kept image.
+- If candidate prompt metadata is missing/blank, GPTViz embeds the current initial markdown prompt before keep.
+- If candidate prompt metadata conflicts with current initial prompt, Keep asks: align prompt (Yes), keep without markdown change (No), or abort (Cancel).
+- Polish uses a non-modal in-view overlay, caches text per markdown file for the plugin session, seeds from vault-root `_polish.md` on first open when cache is blank, replaces `[[self]]` with selected source filename, and does not embed polish text into generated output.
 
 ## Planned
 
-### GPTCut integration (planned)
+### GPTExtract integration (planned)
 
-GPTViz will add a minimal cutout pipeline (gptcut) for generating derived PNG assets from source images.
+GPTViz will add a minimal extraction pipeline (gptextract) for generating derived PNG assets from source images.
 
 Scope and intent:
 
 - Keep authoring in Obsidian using plain Markdown.
 - Reuse existing GPTViz AI infrastructure and Image Review workflow.
-- Support rapid regenerate-and-recut loops while art is evolving.
+- Support rapid regenerate-and-reextract loops while art is evolving.
 
-Cut discovery:
+Extract discovery:
 
 - Scan configured `*.md` files.
-- Detect each section header exactly matching `# Cut`.
-- Each `# Cut` block defines one cut operation.
-- Multiple `# Cut` blocks per file are allowed.
+- Detect each section header exactly matching `# Extract`.
+- Each `# Extract` block defines one extract operation.
+- Multiple `# Extract` blocks per file are allowed.
 
-Cut block format v0:
+Extract block format v0:
 
 - `Asset: <target-name>.png` (required)
 - `Source: <source-name>.png` (optional)
@@ -62,7 +102,7 @@ Default source rule:
 
 AI and output behavior:
 
-- GPTViz sends source image plus cut prompt to image-edit generation.
+- GPTViz sends source image plus extract prompt to image-edit generation.
 - Returned keyed image is post-processed automatically (key color removed to alpha).
 - Final output is written as PNG to the `Asset:` path.
 - Existing output is overwritten on successful regeneration.
@@ -75,8 +115,8 @@ v0 response policy:
 
 Regeneration behavior:
 
-- Running cut operations can be scoped to all files, current file, or one selected block.
-- When a source image is regenerated, GPTViz can rerun affected cuts and refresh outputs.
+- Running extract operations can be scoped to all files, current file, or one selected block.
+- When a source image is regenerated, GPTViz can rerun affected extracts and refresh outputs.
 
 Error handling (fail loud):
 
@@ -87,13 +127,84 @@ Error handling (fail loud):
 - missing AI image payload
 - post-process/write failures
 
-Each error reports file path, `# Cut` block line, category, code, and clear fix guidance.
+Each error reports file path, `# Extract` block line, category, code, and clear fix guidance.
 
 Non-goals for v0:
 
 - user-authored cleanup directives
-- multi-output syntax from one `# Cut` block
+- multi-output syntax from one `# Extract` block
 - advanced compositing DSL
+
+### GPTMark integration (planned)
+
+GPTViz will add a minimal point-target pipeline (gptmark) for extracting reusable target coordinates from images.
+
+Scope and intent:
+
+- Keep authoring in Obsidian using plain Markdown.
+- Reuse existing GPTViz AI infrastructure and markdown-driven workflows.
+- Provide deterministic, resolution-independent target points for downstream tools (for example movi zoom targets).
+
+Mark discovery:
+
+- Scan configured `*.md` files.
+- Detect each section header exactly matching `# Mark`.
+- Each `# Mark` block defines one target-point operation.
+- Multiple `# Mark` blocks per file are allowed.
+
+Mark block format v0:
+
+- `Name: <target-name>` (required; for example `ring`)
+- `Source: <source-name>.png` (optional)
+- free-text location prompt body (required)
+
+Default source rule:
+
+- If `Source:` is omitted, use `<markdown-filename-without-extension>.png`.
+
+AI and output behavior:
+
+- GPTViz sends source image plus mark prompt to a vision-capable model.
+- The model response must be strict JSON with normalized coordinates.
+- Required output fields: `name`, `x`, `y`.
+- Optional fields: `confidence`, `bbox`.
+- Coordinates are normalized to full image dimensions, where `(0,0)` is top-left and `(1,1)` is bottom-right.
+
+Persisted output:
+
+- GPTViz writes/updates a sidecar JSON file named `<markdown-filename-without-extension>.marks.json` in the project root.
+- Each successful mark write stores at minimum: `name`, `source`, `x`, `y`, and timestamp.
+
+v0 response policy:
+
+- Single JSON object is expected per `# Mark` block.
+- If AI returns non-JSON or missing required fields, GPTViz fails that block and reports the error.
+- Optional hardening: run the same mark block multiple times and store median `x,y` in a future mode.
+
+Regeneration behavior:
+
+- Running mark operations can be scoped to all files, current file, or one selected block.
+- When a source image is regenerated, GPTViz can rerun affected marks and refresh sidecar outputs.
+
+Error handling (fail loud):
+
+- Missing `Name:`
+- empty prompt body
+- unresolved source image
+- duplicate `Name:` targets in the same markdown file
+- invalid JSON response
+- missing `x`/`y` fields
+- out-of-range coordinates (outside `0..1`)
+- write failures
+
+Each error reports file path, `# Mark` block line, category, code, and clear fix guidance.
+
+Non-goals for v0:
+
+- automatic object tracking across frames
+- pixel-perfect segmentation masks
+- temporal smoothing across shots
+- coordinate editing UI (manual nudge/overlay may be added later)
 
 
 ## Principle
