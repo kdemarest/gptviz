@@ -171,6 +171,363 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
     onOpen() {
         this.plugin.setCandidateViewActive(true);
+        this.syncModeRibbon();
+    }
+
+    syncModeRibbon() {
+        if (this.plugin && typeof this.plugin.syncModeRibbonForView === "function") {
+            this.plugin.syncModeRibbonForView(this, this.leaf || null);
+        }
+    }
+
+    ensureReturnToNoteAction() {
+        const existingActions = this.containerEl.querySelectorAll(
+            ".gptviz-return-to-note-action, [aria-label=\"Return to note\"], [title=\"Return to note\"]"
+        );
+        existingActions.forEach(action => action.remove());
+
+        const buttonEl = document.createElement("button");
+        buttonEl.classList.add("clickable-icon");
+        buttonEl.classList.add("gptviz-candidate-added-action");
+        buttonEl.classList.add("gptviz-return-to-note-action");
+        buttonEl.setAttribute("aria-label", "Return to note");
+        buttonEl.setAttribute("title", "Return to note");
+        buttonEl.setAttribute("type", "button");
+        buttonEl.setAttribute("data-mode-button-key", "MarkdownMode");
+        GPTViz.obsidian.setIcon(buttonEl, "file-text");
+        buttonEl.addEventListener("click", async () => {
+            try {
+                await this.returnToNote();
+            } catch (error) {
+                this.plugin.reportError("returning to the Markdown note", error);
+            }
+        });
+
+        this.addModeButton(0, buttonEl);
+    }
+
+    ensureMovieModeAction() {
+        const existingActions = this.containerEl.querySelectorAll(
+            ".gptviz-movie-mode-action, [aria-label=\"MovieMode\"], [title=\"MovieMode\"]"
+        );
+        existingActions.forEach(action => action.remove());
+
+        const buttonEl = document.createElement("button");
+        buttonEl.classList.add("clickable-icon");
+        buttonEl.classList.add("gptviz-candidate-added-action");
+        buttonEl.classList.add("gptviz-movie-mode-action");
+        buttonEl.setAttribute("aria-label", "MovieMode");
+        buttonEl.setAttribute("title", "MovieMode");
+        buttonEl.setAttribute("type", "button");
+        buttonEl.setAttribute("data-mode-button-key", "MovieMode");
+        GPTViz.obsidian.setIcon(buttonEl, "film");
+        buttonEl.addEventListener("click", async () => {
+            try {
+                await this.plugin.requestMovieMode({
+                    source: "candidate-view",
+                    filePath: this.activeFile?.path || null
+                });
+            } catch (error) {
+                this.plugin.reportError("switching to MovieMode", error);
+            }
+        });
+
+        this.addModeButton(3, buttonEl);
+    }
+
+    enforceCandidateActionOrder() {
+        const actionsEl = this.containerEl.querySelector(".view-actions");
+        if (!actionsEl) {
+            return;
+        }
+
+        const returnActionEl = actionsEl.querySelector(
+            ".gptviz-return-to-note-action"
+        );
+        if (!returnActionEl) {
+            return;
+        }
+
+        const systemToggler = actionsEl.querySelector(
+            '.view-action.mod-source-view, .view-action[aria-label*="Source mode"], .view-action[aria-label*="Live Preview"], .view-action[aria-label*="Reading view"], .view-action[aria-label*="Edit mode"]'
+        );
+
+        if (systemToggler) {
+            actionsEl.insertBefore(returnActionEl, systemToggler.nextSibling);
+            return;
+        }
+
+        const otherAddedAction = actionsEl.querySelector(
+            ".gptviz-candidate-added-action:not(.gptviz-return-to-note-action)"
+        );
+        if (otherAddedAction) {
+            actionsEl.insertBefore(returnActionEl, otherAddedAction);
+        }
+    }
+
+    getModeRibbon() {
+        const headerEl = this.containerEl.querySelector(".view-header");
+        if (!headerEl) {
+            return null;
+        }
+
+        let ribbon = headerEl.querySelector(".mode-ribbon");
+        if (ribbon) {
+            return ribbon;
+        }
+
+        ribbon = headerEl.createEl("div");
+        ribbon.classList.add("mode-ribbon");
+        ribbon.style.display = "inline-flex";
+        ribbon.style.alignItems = "center";
+        ribbon.style.gap = "0.25em";
+        ribbon.style.marginInlineStart = "auto";
+
+        const actionsEl = headerEl.querySelector(".view-actions");
+        if (actionsEl) {
+            headerEl.insertBefore(ribbon, actionsEl);
+        } else {
+            headerEl.appendChild(ribbon);
+        }
+
+        return ribbon;
+    }
+
+    addModeButton(position, buttonEl) {
+        if (!Number.isInteger(position) || position < 0) {
+            throw new Error("addModeButton requires a non-negative integer position.");
+        }
+        if (!(buttonEl instanceof HTMLElement)) {
+            throw new Error("addModeButton requires buttonEl to be an HTMLElement.");
+        }
+
+        const ribbon = this.getModeRibbon();
+        if (!ribbon) {
+            return null;
+        }
+
+        const fallbackKey =
+            buttonEl.getAttribute("aria-label") ||
+            buttonEl.getAttribute("title") ||
+            (buttonEl.textContent || "").trim();
+        const buttonKey =
+            buttonEl.getAttribute("data-mode-button-key") ||
+            fallbackKey;
+
+        if (buttonKey) {
+            buttonEl.setAttribute("data-mode-button-key", buttonKey);
+            const existingByKey = ribbon.querySelectorAll(
+                `[data-mode-button-key="${CSS.escape(buttonKey)}"]`
+            );
+            existingByKey.forEach(existing => {
+                if (existing !== buttonEl) {
+                    existing.remove();
+                }
+            });
+        }
+
+        const existingAtPosition = ribbon.querySelector(
+            `[data-mode-button-position="${position}"]`
+        );
+        if (existingAtPosition && existingAtPosition !== buttonEl) {
+            existingAtPosition.remove();
+        }
+
+        buttonEl.setAttribute("data-mode-button-position", String(position));
+
+        const orderedButtons = [...ribbon.children].filter(
+            child => child !== buttonEl
+        );
+        const insertBefore = orderedButtons.find(child => {
+            const childPos = Number(
+                child.getAttribute("data-mode-button-position")
+            );
+            return Number.isFinite(childPos) && childPos > position;
+        });
+
+        if (insertBefore) {
+            ribbon.insertBefore(buttonEl, insertBefore);
+        } else {
+            ribbon.appendChild(buttonEl);
+        }
+
+        return buttonEl;
+    }
+
+    ensureModeRibbonMoreActionsButton() {
+        const actionsEl = this.containerEl.querySelector(".view-actions");
+        const optionsActionEl = actionsEl
+            ? actionsEl.querySelector(
+                '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
+            )
+            : null;
+
+        if (!optionsActionEl) {
+            this.containerEl
+                .querySelectorAll('.gptviz-mode-more-actions, [data-mode-button-key="MoreActions"]')
+                .forEach(action => action.remove());
+            return;
+        }
+
+        const buttonEl = document.createElement("button");
+        buttonEl.classList.add("clickable-icon");
+        buttonEl.classList.add("gptviz-mode-more-actions");
+        buttonEl.setAttribute("aria-label", "More Actions");
+        buttonEl.setAttribute("title", "More Actions");
+        buttonEl.setAttribute("type", "button");
+        buttonEl.setAttribute("data-mode-button-key", "MoreActions");
+        GPTViz.obsidian.setIcon(buttonEl, "more-vertical");
+        buttonEl.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const liveActionsEl = this.containerEl.querySelector(".view-actions");
+            const liveOptionsActionEl = liveActionsEl
+                ? liveActionsEl.querySelector(
+                    '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
+                )
+                : null;
+
+            if (!liveOptionsActionEl) {
+                return;
+            }
+
+            liveOptionsActionEl.dispatchEvent(
+                new MouseEvent("click", {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                })
+            );
+        });
+
+        this.addModeButton(99, buttonEl);
+    }
+
+    async returnToNote() {
+        const activeFile = this.activeFile || this.plugin.getCurrentMarkdownFile();
+
+        if (!activeFile) {
+            throw new Error("No active Markdown file to return to.");
+        }
+
+        const preferredSection = this.plugin && typeof this.plugin.getSelectedCandidateAssetSection === "function"
+            ? this.plugin.getSelectedCandidateAssetSection(activeFile.path)
+            : null;
+
+        const waitForViewReady = async () => {
+            await new Promise(resolve => window.setTimeout(resolve, 100));
+        };
+
+        const scrollEditorToCursor = async leaf => {
+            const editor = leaf && leaf.view ? leaf.view.editor : null;
+            if (!editor || typeof editor.getCursor !== "function") {
+                return;
+            }
+
+            let cursor = null;
+            try {
+                cursor = editor.getCursor();
+            } catch (error) {
+                cursor = null;
+            }
+
+            const currentLine = cursor ? Number(cursor.line) : NaN;
+            const hasValidCursor = Number.isFinite(currentLine);
+            const currentCh = cursor ? Number(cursor.ch) : 0;
+            const sectionStart = preferredSection ? Number(preferredSection.startLine) : NaN;
+            const sectionEnd = preferredSection ? Number(preferredSection.endLine) : NaN;
+            const hasSection = Number.isFinite(sectionStart);
+
+            let targetCursor = null;
+
+            if (hasSection) {
+                const inSection = hasValidCursor &&
+                    currentLine >= sectionStart &&
+                    (!Number.isFinite(sectionEnd) || currentLine < sectionEnd);
+
+                if (!inSection) {
+                    targetCursor = {
+                        line: Math.max(0, sectionStart),
+                        ch: 0
+                    };
+                }
+            }
+
+            if (!targetCursor && hasValidCursor) {
+                targetCursor = {
+                    line: currentLine,
+                    ch: Number.isFinite(currentCh) ? currentCh : 0
+                };
+            }
+
+            if (!targetCursor) {
+                return;
+            }
+
+            if (typeof editor.setCursor === "function") {
+                try {
+                    editor.setCursor(targetCursor);
+                } catch (error) {
+                    const detail = error instanceof Error
+                        ? (error.stack || error.message)
+                        : String(error);
+                    throw new Error(
+                        "MarkdownMode cursor positioning failed: editor.setCursor threw for " +
+                        `${activeFile.path} at line ${targetCursor.line}, ch ${targetCursor.ch}. ` +
+                        `Reason: ${detail}`
+                    );
+                }
+            }
+
+            await new Promise(resolve => window.setTimeout(resolve, 50));
+
+            const containerEl = leaf && leaf.view ? leaf.view.containerEl : null;
+            const scrollerEl = containerEl
+                ? containerEl.querySelector(".cm-scroller")
+                : null;
+            const activeLineEl = containerEl
+                ? containerEl.querySelector(".cm-active .cm-line, .cm-line.cm-active, .cm-activeLine .cm-line, .cm-activeLine")
+                : null;
+
+            if (!scrollerEl || !activeLineEl) {
+                return;
+            }
+
+            const scrollerRect = scrollerEl.getBoundingClientRect();
+            const lineRect = activeLineEl.getBoundingClientRect();
+            const computedLineHeight = Number.parseFloat(
+                window.getComputedStyle(activeLineEl).lineHeight
+            );
+            const measuredLineHeight = lineRect.height;
+            const lineHeight = Number.isFinite(computedLineHeight) && computedLineHeight > 0
+                ? computedLineHeight
+                : (Number.isFinite(measuredLineHeight) && measuredLineHeight > 0 ? measuredLineHeight : 20);
+            const topPaddingLines = 4;
+            const targetTop = scrollerRect.top + lineHeight * topPaddingLines;
+            const delta = lineRect.top - targetTop;
+
+            if (Number.isFinite(delta) && Math.abs(delta) > 1) {
+                const nextScrollTop = Math.max(0, scrollerEl.scrollTop + delta);
+                scrollerEl.scrollTop = nextScrollTop;
+            }
+        };
+
+        const markdownLeaf = this.app.workspace
+            .getLeavesOfType("markdown")
+            .find(leaf => leaf.view.file?.path === activeFile.path);
+
+        if (markdownLeaf) {
+            await this.app.workspace.revealLeaf(markdownLeaf);
+            await waitForViewReady();
+            await scrollEditorToCursor(markdownLeaf);
+            return;
+        }
+
+        const newLeaf = this.app.workspace.getLeaf(true);
+        await newLeaf.openFile(activeFile);
+        await waitForViewReady();
+        await scrollEditorToCursor(newLeaf);
     }
 
     async togglePolishInput() {
@@ -326,9 +683,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.hasMarkBlocks = await this.plugin.hasMarkBlocksForFile(activeFile);
         this.hasExtractBlocks = await this.plugin.hasExtractBlocksForFile(activeFile);
 
+        this.assetPath = this.plugin.getActiveCandidateAssetPath(activeFile);
         this.candidates = await GPTViz.ensureKeptImageCandidate(
             this.app,
-            activeFile
+            activeFile,
+            this.assetPath
         );
 
         if (this.plugin.debug) {
@@ -336,8 +695,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         }
 
         if (this.candidates.length === 0) {
+            const noCandidatesAssetPath = this.assetPath || `${activeFile.basename}.png`;
+            const noCandidatesAssetName = noCandidatesAssetPath.split("/").pop() || `${activeFile.basename}.png`;
+            const noCandidatesLabel = noCandidatesAssetName.replace(/\.[^./]+$/, "");
             contentEl.createEl("div", {
-                text: `No candidates for ${activeFile.name}.`
+                text: `No candidates for ${noCandidatesLabel}.`
             });
             this.createGenerateButton(contentEl);
             return;
@@ -362,29 +724,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         titleRow.style.alignItems = "center";
         titleRow.style.gap = "0.5em";
         titleRow.style.marginBottom = "0.5em";
-
-        const markdownButton = titleRow.createEl("button");
-        markdownButton.setAttribute("aria-label", "Return to note");
-        markdownButton.setAttribute("title", "Return to note");
-        GPTViz.obsidian.setIcon(markdownButton, "file-text");
-        markdownButton.style.minWidth = "3em";
-        markdownButton.addEventListener("click", async () => {
-            try {
-                const markdownLeaf = this.app.workspace
-                    .getLeavesOfType("markdown")
-                    .find(leaf => leaf.view.file?.path === this.activeFile.path);
-
-                if (markdownLeaf) {
-                    await this.app.workspace.revealLeaf(markdownLeaf);
-                } else {
-                    await this.app.workspace.getLeaf(true).openFile(
-                        this.activeFile
-                    );
-                }
-            } catch (error) {
-                this.plugin.reportError("returning to the Markdown note", error);
-            }
-        });
 
         this.candidateTitleEl = titleRow.createEl("h3");
         this.candidateTitleEl.style.margin = "0";
@@ -577,6 +916,10 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.prevButton.setAttribute("aria-label", "Previous image");
         this.prevButton.setAttribute("title", "Previous image");
         GPTViz.obsidian.setIcon(this.prevButton, "chevron-left");
+        this.goKeptButton = navigation.createEl("button");
+        this.goKeptButton.setAttribute("aria-label", "Go to kept image");
+        this.goKeptButton.setAttribute("title", "Go to kept image");
+        GPTViz.obsidian.setIcon(this.goKeptButton, "bookmark");
         this.nextButton = navigation.createEl("button");
         this.nextButton.setAttribute("aria-label", "Next image");
         this.nextButton.setAttribute("title", "Next image");
@@ -616,6 +959,20 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
         });
 
+        this.goKeptButton.addEventListener("click", async () => {
+            try {
+                const keptIndex = await this.findKeptCandidateIndex();
+                if (keptIndex === -1 || keptIndex === this.index) {
+                    return;
+                }
+
+                this.index = keptIndex;
+                await this.renderCurrentImage();
+            } catch (error) {
+                this.plugin.reportError("jumping to the kept candidate image", error);
+            }
+        });
+
         this.keepButton.addEventListener("click", async () => {
             try {
                 await this.keepCurrentImage();
@@ -645,6 +1002,29 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         if (this.plugin.debug) {
             this.plugin.debug(`view refresh rendered index=${this.index}, path=${this.candidates[this.index].file.path}`);
         }
+
+        this.syncModeRibbon();
+    }
+
+    async findKeptCandidateIndex() {
+        const keptFile = this.app.vault.getAbstractFileByPath(
+            this.assetPath || `${this.activeFile.basename}.png`
+        );
+
+        if (!keptFile || !Array.isArray(this.candidates) || this.candidates.length === 0) {
+            return -1;
+        }
+
+        const keptBinary = await this.app.vault.readBinary(keptFile);
+
+        for (let index = 0; index < this.candidates.length; index++) {
+            const candidateBinary = await this.app.vault.readBinary(this.candidates[index].file);
+            if (GPTViz.binaryEqual(candidateBinary, keptBinary)) {
+                return index;
+            }
+        }
+
+        return -1;
     }
 
     async renderCurrentImage() {
@@ -671,7 +1051,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         );
 
         const keptFile = this.app.vault.getAbstractFileByPath(
-            `${this.activeFile.basename}.png`
+            this.assetPath || `${this.activeFile.basename}.png`
         );
         let isKept = false;
 
@@ -685,6 +1065,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.keepButton.style.color = isKept
             ? "var(--color-green)"
             : "";
+
+        if (this.goKeptButton) {
+            const keptIndex = await this.findKeptCandidateIndex();
+            this.goKeptButton.disabled = keptIndex === -1 || keptIndex === this.index;
+        }
 
         const showMarkButton = Boolean(isKept && this.hasMarkBlocks);
         this.markButton.style.display = showMarkButton ? "" : "none";
@@ -807,7 +1192,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         let binary = await this.app.vault.readBinary(candidate.file);
         const candidateTimestamps = GPTViz.fileTimestampOptions(candidate.file);
         let savedPrompt = GPTViz.extractPromptFromPng(binary);
-        const currentPrompt = this.plugin.getCurrentPromptForFile(
+        const currentPrompt = await this.plugin.getCurrentPromptForFile(
             this.activeFile
         );
 
@@ -845,7 +1230,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
         }
 
-        const path = `${this.activeFile.basename}.png`;
+        const path = this.assetPath || `${this.activeFile.basename}.png`;
         const keptFile = this.app.vault.getAbstractFileByPath(path);
 
         if (keptFile) {

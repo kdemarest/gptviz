@@ -13,12 +13,74 @@ GPTViz.parseHeading = function(line) {
     };
 };
 
+GPTViz.getDependencyDefaultExtension = function(operation) {
+    if (operation === "Prompt" || operation === "Extract") {
+        return ".png";
+    }
+
+    if (operation === "Mark") {
+        return ".marks.json";
+    }
+
+    if (operation === "Script") {
+        return ".ms";
+    }
+
+    return "";
+};
+
+GPTViz.normalizeDependencyOutputName = function(operation, name) {
+    const value = String(name || "").trim();
+    const defaultExtension = GPTViz.getDependencyDefaultExtension(operation);
+
+    if (!defaultExtension) {
+        return value;
+    }
+
+    if (value.toLowerCase().endsWith(defaultExtension)) {
+        return value.slice(0, -defaultExtension.length);
+    }
+
+    return value;
+};
+
+GPTViz.parseDependencyOperationHeading = function(line) {
+    const heading = GPTViz.parseHeading(line);
+    if (!heading) {
+        return null;
+    }
+
+    const match = /^(Prompt|Extract|Mark|Script)(?:[ \t]*:[ \t]*|[ \t]+)(.+)$/.exec(
+        heading.text.trim()
+    );
+
+    if (!match) {
+        return null;
+    }
+
+    const operation = match[1];
+    const name = match[2].trim();
+    if (!name) {
+        return null;
+    }
+
+    const canonicalName = GPTViz.normalizeDependencyOutputName(operation, name);
+
+    return {
+        level: heading.level,
+        operation,
+        name,
+        canonicalName,
+        id: `${operation}:${canonicalName}`
+    };
+};
+
 GPTViz.isPromptHeading = function(line) {
     const heading = GPTViz.parseHeading(line);
 
     return (
         heading !== null &&
-        /^Prompt(?:[ \t]|$)/.test(heading.text)
+        /^Prompt(?:[ \t]|:|$)/.test(heading.text)
     );
 };
 
@@ -115,6 +177,256 @@ GPTViz.getPromptPartsFromText = function(text) {
     return GPTViz.getPromptParts({
         text: String(text || "")
     });
+};
+
+GPTViz.normalizeIncludeHeadingLabel = function(value) {
+    return String(value || "")
+        .replace(/\s*#+\s*$/, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+};
+
+GPTViz.parseIncludeSpec = function(specText) {
+    const raw = String(specText || "").trim();
+
+    if (!raw) {
+        return {
+            path: "",
+            heading: ""
+        };
+    }
+
+    const hashIndex = raw.indexOf("#");
+
+    if (hashIndex === -1) {
+        return {
+            path: raw,
+            heading: ""
+        };
+    }
+
+    return {
+        path: raw.slice(0, hashIndex).trim(),
+        heading: raw.slice(hashIndex + 1).trim()
+    };
+};
+
+GPTViz.normalizeVaultPath = function(path) {
+    const parts = [];
+
+    for (const part of String(path || "").replace(/\\/g, "/").split("/")) {
+        const segment = part.trim();
+
+        if (!segment || segment === ".") {
+            continue;
+        }
+
+        if (segment === "..") {
+            if (parts.length > 0) {
+                parts.pop();
+            }
+            continue;
+        }
+
+        parts.push(segment);
+    }
+
+    return parts.join("/");
+};
+
+GPTViz.resolveIncludePath = function(targetPath, fromPath, vaultName) {
+    let includePath = String(targetPath || "").trim();
+
+    if (!includePath) {
+        return "";
+    }
+
+    includePath = includePath.replace(/^<|>$/g, "").replace(/\\/g, "/");
+
+    if (includePath.startsWith("/")) {
+        const marker = `/${vaultName}/`;
+        const markerIndex = includePath.indexOf(marker);
+
+        if (markerIndex !== -1) {
+            includePath = includePath.slice(markerIndex + marker.length);
+        }
+
+        return GPTViz.normalizeVaultPath(includePath.replace(/^\/+/, ""));
+    }
+
+    const sourcePath = GPTViz.normalizeVaultPath(fromPath || "");
+    const slashIndex = sourcePath.lastIndexOf("/");
+    const sourceDir = slashIndex === -1
+        ? ""
+        : sourcePath.slice(0, slashIndex + 1);
+
+    return GPTViz.normalizeVaultPath(`${sourceDir}${includePath}`);
+};
+
+GPTViz.extractHeadingBodyFromText = function(text, headingName) {
+    const target = GPTViz.normalizeIncludeHeadingLabel(headingName);
+
+    if (!target) {
+        return null;
+    }
+
+    const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    let startLine = -1;
+    let level = 0;
+
+    for (let line = 0; line < lines.length; line++) {
+        const parsed = GPTViz.parseHeading(lines[line]);
+
+        if (!parsed) {
+            continue;
+        }
+
+        if (GPTViz.normalizeIncludeHeadingLabel(parsed.text) === target) {
+            startLine = line;
+            level = parsed.level;
+            break;
+        }
+    }
+
+    if (startLine === -1) {
+        return null;
+    }
+
+    let endLine = lines.length;
+
+    for (let line = startLine + 1; line < lines.length; line++) {
+        const parsed = GPTViz.parseHeading(lines[line]);
+
+        if (parsed && parsed.level <= level) {
+            endLine = line;
+            break;
+        }
+    }
+
+    return lines.slice(startLine + 1, endLine).join("\n");
+};
+
+GPTViz.expandIncludesInText = async function(app, text, fromPath, stack, maxDepth, options) {
+    const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    const output = [];
+    const includeStack = Array.isArray(stack) ? stack : [];
+    const depthLimit = Number.isFinite(Number(maxDepth))
+        ? Number(maxDepth)
+        : 8;
+    const includeOptions = options && typeof options === "object"
+        ? options
+        : {};
+    const disallowIncludedImagesTag = includeOptions.disallowIncludedImagesTag === true;
+
+    if (includeStack.length > depthLimit) {
+        throw new Error(
+            `Include error at ${fromPath || "<inline>"}: maximum include depth exceeded (${depthLimit}).`
+        );
+    }
+
+    for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        const match = /^\s*\{#(?:include|incude)\s+(.+?)\}\s*$/i.exec(line);
+
+        if (!match) {
+            output.push(line);
+            continue;
+        }
+
+        const includeSpec = GPTViz.parseIncludeSpec(match[1]);
+        const sourceLabel = fromPath || "<inline>";
+        const sourceLine = index + 1;
+
+        if (!includeSpec.path) {
+            throw new Error(
+                `Include error at ${sourceLabel}:${sourceLine} - missing include path.`
+            );
+        }
+
+        const resolvedPath = GPTViz.resolveIncludePath(
+            includeSpec.path,
+            fromPath,
+            app.vault.getName()
+        );
+
+        if (!resolvedPath) {
+            throw new Error(
+                `Include error at ${sourceLabel}:${sourceLine} - could not resolve include path '${includeSpec.path}'.`
+            );
+        }
+
+        const includeKey = includeSpec.heading
+            ? `${resolvedPath}#${includeSpec.heading}`
+            : resolvedPath;
+
+        if (includeStack.includes(includeKey)) {
+            const chain = [...includeStack, includeKey].join(" -> ");
+            throw new Error(
+                `Include error at ${sourceLabel}:${sourceLine} - include cycle detected: ${chain}`
+            );
+        }
+
+        const includeFile = app.vault.getAbstractFileByPath(resolvedPath);
+
+        if (!includeFile || !includeFile.extension) {
+            throw new Error(
+                `Include error at ${sourceLabel}:${sourceLine} - file not found: ${resolvedPath}`
+            );
+        }
+
+        let includeText;
+
+        try {
+            includeText = await app.vault.cachedRead(includeFile);
+        } catch (error) {
+            const message = error instanceof Error
+                ? error.message
+                : String(error);
+            throw new Error(
+                `Include error at ${sourceLabel}:${sourceLine} - could not read ${resolvedPath}: ${message}`
+            );
+        }
+
+        if (includeSpec.heading) {
+            const sectionBody = GPTViz.extractHeadingBodyFromText(
+                includeText,
+                includeSpec.heading
+            );
+
+            if (sectionBody === null) {
+                throw new Error(
+                    `Include error at ${sourceLabel}:${sourceLine} - heading not found in ${resolvedPath}: ${includeSpec.heading}`
+                );
+            }
+
+            includeText = sectionBody;
+        }
+
+        if (disallowIncludedImagesTag) {
+            const includedLines = String(includeText || "").replace(/\r\n/g, "\n").split("\n");
+            const imagesIndex = includedLines.findIndex(line => /^[ \t]*Images:[ \t]*/i.test(line));
+
+            if (imagesIndex !== -1) {
+                throw new Error(
+                    `Include error at ${sourceLabel}:${sourceLine} - included content from ${resolvedPath} contains an Images: tag (line ${imagesIndex + 1}); Images: is not allowed inside # Prompt includes.`
+                );
+            }
+        }
+
+        const expanded = await GPTViz.expandIncludesInText(
+            app,
+            includeText,
+            resolvedPath,
+            [...includeStack, includeKey],
+            depthLimit,
+            includeOptions
+        );
+
+        output.push(expanded);
+    }
+
+    return output.join("\n");
 };
 
 GPTViz.binaryToBase64 = function(binary) {

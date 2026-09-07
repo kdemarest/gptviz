@@ -17,7 +17,9 @@ Core rules:
 - Keep code Android-compatible with Obsidian mobile.
 - Use Obsidian APIs, not Node/Electron APIs.
 - Never expose, log, or store API keys outside Obsidian SecretStorage.
+- Dependency graph creation must have exactly one implementation path in gptviz; all dependency features must query that shared graph instead of rebuilding parallel graph logic.
 - Update SPEC.md Implemented as needed; do not edit Planned unless explicitly requested.
+- If a SPEC.md Implemented update introduces or changes MoviScript syntax/authoring rules, update root MoviScriptManual.md in the same turn using batched edits, so spec and manual stay synchronized.
 
 Scripts and build workflow:
 - Run scripts as bash script.sh (not ./script.sh).

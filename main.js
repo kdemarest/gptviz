@@ -161,6 +161,135 @@ GPTViz.ImageIntegrityModal = class extends GPTViz.obsidian.Modal {
     }
 };
 
+GPTViz.MovieScriptUsageModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, sourceFile, rows, onPick) {
+        super(app);
+        this.app = app;
+        this.sourceFile = sourceFile;
+        this.rows = Array.isArray(rows) ? rows : [];
+        this.onPick = typeof onPick === "function" ? onPick : null;
+    }
+
+    onOpen() {
+        const contentEl = this.contentEl;
+        contentEl.empty();
+
+        const sourceLabel = this.sourceFile && this.sourceFile.basename
+            ? this.sourceFile.basename
+            : "current note";
+        this.titleEl.textContent = `MovieMode scripts using ${sourceLabel} assets`;
+
+        if (this.rows.length === 0) {
+            contentEl.createEl("p", {
+                text: `No # Script dependencies reference assets from ${sourceLabel}.`
+            });
+            return;
+        }
+
+        const list = contentEl.createEl("div");
+        list.style.maxHeight = "60vh";
+        list.style.overflowY = "auto";
+
+        for (const row of this.rows) {
+            const item = list.createEl("div");
+            item.style.display = "grid";
+            item.style.gridTemplateColumns = "1fr";
+            item.style.gap = "0.25em";
+            item.style.padding = "0.6em 0";
+            item.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+            const openButton = item.createEl("button", {
+                text: row.name
+            });
+            openButton.style.textAlign = "left";
+            openButton.addEventListener("click", async () => {
+                try {
+                    if (this.onPick) {
+                        await this.onPick(row);
+                    }
+                } finally {
+                    this.close();
+                }
+            });
+
+            item.createEl("div", {
+                text: row.path
+            });
+            if (Array.isArray(row.matches) && row.matches.length > 0) {
+                item.createEl("div", {
+                    text: `Depends: ${row.matches.join(", ")}`
+                });
+            }
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+};
+
+GPTViz.MovieAssetUsageModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, sourceFile, rows, onPick) {
+        super(app);
+        this.app = app;
+        this.sourceFile = sourceFile;
+        this.rows = Array.isArray(rows) ? rows : [];
+        this.onPick = typeof onPick === "function" ? onPick : null;
+    }
+
+    onOpen() {
+        const contentEl = this.contentEl;
+        contentEl.empty();
+
+        const sourceLabel = this.sourceFile && this.sourceFile.basename
+            ? this.sourceFile.basename
+            : "current note";
+        this.titleEl.textContent = `MovieMode assets in ${sourceLabel}`;
+
+        if (this.rows.length === 0) {
+            contentEl.createEl("p", {
+                text: `No Prompt/Extract asset headings were found in ${sourceLabel}.`
+            });
+            return;
+        }
+
+        const list = contentEl.createEl("div");
+        list.style.maxHeight = "60vh";
+        list.style.overflowY = "auto";
+
+        for (const row of this.rows) {
+            const item = list.createEl("div");
+            item.style.display = "grid";
+            item.style.gridTemplateColumns = "1fr";
+            item.style.gap = "0.25em";
+            item.style.padding = "0.6em 0";
+            item.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+            const openButton = item.createEl("button", {
+                text: row.label
+            });
+            openButton.style.textAlign = "left";
+            openButton.addEventListener("click", async () => {
+                try {
+                    if (this.onPick) {
+                        await this.onPick(row);
+                    }
+                } finally {
+                    this.close();
+                }
+            });
+
+            item.createEl("div", {
+                text: row.filePath
+            });
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+};
+
 GPTViz.getImageTagReferences = function(text) {
     const references = [];
     const addReference = value => {
@@ -235,6 +364,754 @@ GPTViz.findInvalidImageReferences = async function(app) {
     }
 
     return rows;
+};
+
+GPTViz.normalizeDependencyConfigPath = function(value, asDirectory) {
+    let path = String(value || "").trim().replace(/\\/g, "/");
+
+    path = path.replace(/^\.\//, "").replace(/^\/+/, "");
+
+    if (asDirectory) {
+        path = path.replace(/\/+$/, "");
+        return path ? `${path}/` : "";
+    }
+
+    return path.replace(/\/+$/, "");
+};
+
+GPTViz.loadDependencyValidationConfig = async function(app) {
+    const path = "_config.json";
+    const adapter = app.vault.adapter;
+
+    if (!(await adapter.exists(path))) {
+        return {
+            path,
+            loaded: false,
+            sourceDirectories: [],
+            excludedFiles: []
+        };
+    }
+
+    const text = await adapter.read(path);
+    let raw;
+
+    try {
+        raw = JSON.parse(text);
+    } catch (error) {
+        throw new Error(`Invalid dependency config JSON at ${path}: ${error.message}`);
+    }
+
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error(`Invalid dependency config at ${path}: root must be a JSON object.`);
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(raw, "source_dirs")) {
+        throw new Error(`Invalid dependency config at ${path}: missing required 'source_dirs' array.`);
+    }
+
+    if (!Array.isArray(raw.source_dirs)) {
+        throw new Error(`Invalid dependency config at ${path}: 'source_dirs' must be an array.`);
+    }
+
+    const sourceDirectories = [];
+    const seenSourceDirectories = new Set();
+
+    for (let index = 0; index < raw.source_dirs.length; index++) {
+        const entry = raw.source_dirs[index];
+
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}] must be an object { dir, recurse }.`);
+        }
+
+        if (typeof entry.dir !== "string") {
+            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}].dir must be a string.`);
+        }
+
+        if (typeof entry.recurse !== "boolean") {
+            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}].recurse must be a boolean.`);
+        }
+
+        const normalizedDir = GPTViz.normalizeDependencyConfigPath(entry.dir, true);
+        const key = `${normalizedDir}::${entry.recurse ? "1" : "0"}`;
+
+        if (seenSourceDirectories.has(key)) {
+            continue;
+        }
+
+        seenSourceDirectories.add(key);
+        sourceDirectories.push({
+            dir: normalizedDir,
+            recurse: entry.recurse
+        });
+    }
+
+    if (sourceDirectories.length === 0) {
+        throw new Error(`Invalid dependency config at ${path}: 'source_dirs' must contain at least one entry.`);
+    }
+
+    const excludedFiles = [];
+    const seenExcludedFiles = new Set();
+
+    if (Object.prototype.hasOwnProperty.call(raw, "exclude_files")) {
+        if (!Array.isArray(raw.exclude_files)) {
+            throw new Error(`Invalid dependency config at ${path}: 'exclude_files' must be an array when provided.`);
+        }
+
+        for (let index = 0; index < raw.exclude_files.length; index++) {
+            const value = raw.exclude_files[index];
+
+            if (typeof value !== "string") {
+                throw new Error(`Invalid dependency config at ${path}: exclude_files[${index}] must be a string.`);
+            }
+
+            const normalized = GPTViz.normalizeDependencyConfigPath(value, false);
+            if (!normalized || seenExcludedFiles.has(normalized)) {
+                continue;
+            }
+
+            seenExcludedFiles.add(normalized);
+            excludedFiles.push(normalized);
+        }
+    }
+
+    return {
+        path,
+        loaded: true,
+        sourceDirectories,
+        excludedFiles
+    };
+};
+
+GPTViz.matchesDependencyExcludePattern = function(filePath, pattern) {
+    const normalizedPath = GPTViz.normalizeDependencyConfigPath(filePath, false);
+    const normalizedPattern = GPTViz.normalizeDependencyConfigPath(pattern, false);
+
+    if (!normalizedPattern) {
+        return false;
+    }
+
+    if (!normalizedPattern.includes("*")) {
+        return normalizedPath === normalizedPattern;
+    }
+
+    const escaped = normalizedPattern
+        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*");
+    const regex = new RegExp(`^${escaped}$`);
+
+    return regex.test(normalizedPath);
+};
+
+GPTViz.isMarkdownFileAllowedForDependencyValidation = function(filePath, config) {
+    const normalizedPath = GPTViz.normalizeDependencyConfigPath(filePath, false);
+    const excludedFiles = Array.isArray(config.excludedFiles)
+        ? config.excludedFiles
+        : [];
+
+    for (const pattern of excludedFiles) {
+        if (GPTViz.matchesDependencyExcludePattern(normalizedPath, pattern)) {
+            return false;
+        }
+    }
+
+    const sourceDirectories = Array.isArray(config.sourceDirectories)
+        ? config.sourceDirectories
+        : [];
+
+    if (sourceDirectories.length === 0) {
+        return false;
+    }
+
+    const parentDirectory = normalizedPath.includes("/")
+        ? normalizedPath.slice(0, normalizedPath.lastIndexOf("/") + 1)
+        : "";
+
+    for (const sourceDir of sourceDirectories) {
+        const dir = GPTViz.normalizeDependencyConfigPath(sourceDir.dir, true);
+        const recurse = sourceDir.recurse === true;
+
+        if (recurse) {
+            if (!dir || normalizedPath.startsWith(dir)) {
+                return true;
+            }
+            continue;
+        }
+
+        if (parentDirectory === dir) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+GPTViz.normalizeDependencyAssetPath = function(value, fallbackExtension) {
+    let path = String(value || "").trim();
+
+    path = path.replace(/^<|>$/g, "");
+    path = path.replace(/\\/g, "/");
+    path = path.replace(/^\.\//, "").replace(/^\/+/, "");
+
+    if (!path) {
+        return "";
+    }
+
+    if (fallbackExtension && !/\.[^./]+$/.test(path)) {
+        path = `${path}${fallbackExtension}`;
+    }
+
+    return path;
+};
+
+GPTViz.parseDependencyDeclaredInputs = function(operation, sectionText, defaultSource) {
+    const lines = String(sectionText || "").split("\n");
+    const inputs = [];
+
+    if (operation === "Prompt") {
+        for (const line of lines) {
+            const match = /^[ \t]*(?:Images|Photos):[ \t]*(.*)$/i.exec(line);
+            if (!match) {
+                continue;
+            }
+
+            for (const raw of match[1].split(",")) {
+                const normalized = GPTViz.normalizeDependencyAssetPath(raw, ".png");
+                if (normalized) {
+                    inputs.push(normalized);
+                }
+            }
+        }
+
+        return [...new Set(inputs)];
+    }
+
+    if (operation === "Extract" || operation === "Mark") {
+        let source = "";
+
+        for (const line of lines) {
+            const match = /^[ \t]*Source:[ \t]*(.+)$/i.exec(line);
+            if (match) {
+                source = match[1].trim();
+                break;
+            }
+        }
+
+        const normalized = GPTViz.normalizeDependencyAssetPath(
+            source || defaultSource,
+            ".png"
+        );
+
+        return normalized ? [normalized] : [];
+    }
+
+    if (operation === "Script") {
+        return [];
+    }
+
+    return [];
+};
+
+GPTViz.getDependencyRecordOutputPath = function(record) {
+    if (record.operation !== "Prompt" && record.operation !== "Extract") {
+        return "";
+    }
+
+    return GPTViz.normalizeDependencyAssetPath(record.name, ".png");
+};
+
+GPTViz.getScriptDependenciesFromMoviParser = async function(app, markdownFilePath) {
+    const filePath = String(markdownFilePath || "").trim();
+    if (!filePath) {
+        return [];
+    }
+
+    return await new Promise(resolve => {
+        let settled = false;
+        const finish = value => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            resolve(Array.isArray(value) ? value : []);
+        };
+
+        const timeout = window.setTimeout(() => {
+            finish([]);
+        }, 500);
+
+        const event = new CustomEvent("gptviz:script-required-assets-request", {
+            detail: {
+                filePath,
+                resolve: payload => {
+                    window.clearTimeout(timeout);
+                    if (payload && payload.ok && Array.isArray(payload.requiredAssets)) {
+                        finish(payload.requiredAssets);
+                        return;
+                    }
+                    finish([]);
+                },
+                reject: () => {
+                    window.clearTimeout(timeout);
+                    finish([]);
+                }
+            },
+            cancelable: false
+        });
+
+        window.dispatchEvent(event);
+    }).then(values => {
+        const normalized = [];
+        const seen = new Set();
+        for (const value of values) {
+            const dep = GPTViz.normalizeDependencyAssetPath(value, "").toLowerCase();
+            if (!dep || seen.has(dep)) {
+                continue;
+            }
+            seen.add(dep);
+            normalized.push(dep);
+        }
+        return normalized;
+    });
+};
+
+GPTViz.buildDependencyHeadingReport = async function(app) {
+    const allMarkdownFiles = app.vault.getMarkdownFiles();
+    const dependencyConfig = await GPTViz.loadDependencyValidationConfig(app);
+    const markdownFiles = allMarkdownFiles.filter(markdownFile =>
+        GPTViz.isMarkdownFileAllowedForDependencyValidation(markdownFile.path, dependencyConfig)
+    );
+    const errors = [];
+    const warnings = [];
+    const records = [];
+    const promptByName = new Map();
+    const extractByName = new Map();
+    const markByName = new Map();
+    const markBySourceAndName = new Map();
+    const scriptDependenciesByFilePath = new Map();
+
+    const pushIssue = (collection, filePath, line, operation, name, message, code) => {
+        collection.push({
+            key: `${filePath}#${operation}:${name}`,
+            filePath,
+            line,
+            operation,
+            name,
+            code,
+            message
+        });
+    };
+
+    const ensureBucket = (map, key) => {
+        if (!map.has(key)) {
+            map.set(key, []);
+        }
+        return map.get(key);
+    };
+
+    for (const markdownFile of markdownFiles) {
+        const text = await app.vault.cachedRead(markdownFile);
+        const lines = String(text || "").split("\n");
+        const seenInFile = new Set();
+
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            const heading = GPTViz.parseHeading(lines[lineIndex]);
+            if (!heading) {
+                continue;
+            }
+
+            const operationLike = /^(Prompt|Extract|Mark|Script)\b/.exec(heading.text.trim());
+            if (!operationLike) {
+                continue;
+            }
+
+            const parsed = GPTViz.parseDependencyOperationHeading(lines[lineIndex]);
+            const lineNumber = lineIndex + 1;
+
+            if (!parsed) {
+                const opName = operationLike[1];
+                const fallbackName = heading.text.trim().replace(/^\S+[ \t]*/, "") || "invalid";
+                pushIssue(
+                    errors,
+                    markdownFile.path,
+                    lineNumber,
+                    opName,
+                    fallbackName,
+                    `Unsupported ${opName} heading form. Use '## <Operation>: <AssetFileName>' or '## <Operation> <AssetFileName>'.`,
+                    "invalid_heading_form"
+                );
+                continue;
+            }
+
+            const identity = `${parsed.operation}:${parsed.canonicalName || parsed.name}`;
+            const fileIdentityKey = `${markdownFile.path}#${identity}`.toLowerCase();
+            if (seenInFile.has(fileIdentityKey)) {
+                pushIssue(
+                    errors,
+                    markdownFile.path,
+                    lineNumber,
+                    parsed.operation,
+                    parsed.name,
+                    `Duplicate block identity '${identity}' in the same file.`,
+                    "duplicate_block_identity"
+                );
+                continue;
+            }
+            seenInFile.add(fileIdentityKey);
+
+            if (!/^[A-Za-z0-9_ -]+(?:\.[A-Za-z0-9_ -]+)*$/.test(parsed.name)) {
+                pushIssue(
+                    errors,
+                    markdownFile.path,
+                    lineNumber,
+                    parsed.operation,
+                    parsed.name,
+                    `Illegal target name '${parsed.name}'. Use only letters, numbers, spaces, underscores, hyphens, and dots.`,
+                    "illegal_target_name"
+                );
+                continue;
+            }
+
+            const section = GPTViz.getHeadingSectionFromLines(lines, lineIndex);
+            const defaultSource = `${markdownFile.basename}.png`;
+            let resolvedInputs = GPTViz.parseDependencyDeclaredInputs(
+                parsed.operation,
+                section.text,
+                defaultSource
+            );
+
+            if (parsed.operation === "Script") {
+                if (!scriptDependenciesByFilePath.has(markdownFile.path)) {
+                    const dependencies = await GPTViz.getScriptDependenciesFromMoviParser(
+                        app,
+                        markdownFile.path
+                    );
+                    scriptDependenciesByFilePath.set(markdownFile.path, dependencies);
+                }
+                resolvedInputs = scriptDependenciesByFilePath.get(markdownFile.path) || [];
+            }
+
+            const source = parsed.operation === "Mark"
+                ? (resolvedInputs[0] || "")
+                : "";
+
+            const record = {
+                id: `${markdownFile.path}#${identity}`,
+                filePath: markdownFile.path,
+                fileName: markdownFile.name,
+                line: lineNumber,
+                operation: parsed.operation,
+                name: parsed.name,
+                canonicalName: parsed.canonicalName || parsed.name,
+                source,
+                resolvedInputs,
+                outputPath: ""
+            };
+
+            record.outputPath = GPTViz.getDependencyRecordOutputPath(record);
+            records.push(record);
+
+            const normalizedName = record.canonicalName.toLowerCase();
+            if (parsed.operation === "Prompt") {
+                ensureBucket(promptByName, normalizedName).push(record);
+            } else if (parsed.operation === "Extract") {
+                ensureBucket(extractByName, normalizedName).push(record);
+            } else if (parsed.operation === "Mark") {
+                ensureBucket(markByName, normalizedName).push(record);
+                const normalizedSource = String(source || "").toLowerCase();
+                const sourceKey = `${normalizedSource}::${normalizedName}`;
+                ensureBucket(markBySourceAndName, sourceKey).push(record);
+            }
+        }
+    }
+
+    for (const entries of promptByName.values()) {
+        if (entries.length > 1) {
+            for (const entry of entries.slice(1)) {
+                pushIssue(
+                    errors,
+                    entry.filePath,
+                    entry.line,
+                    "Prompt",
+                    entry.name,
+                    `Duplicate prompt target '${entry.name}' in project.`,
+                    "duplicate_prompt_name"
+                );
+            }
+        }
+    }
+
+    for (const entries of extractByName.values()) {
+        if (entries.length > 1) {
+            for (const entry of entries.slice(1)) {
+                pushIssue(
+                    errors,
+                    entry.filePath,
+                    entry.line,
+                    "Extract",
+                    entry.name,
+                    `Duplicate extract target '${entry.name}' in project.`,
+                    "duplicate_extract_name"
+                );
+            }
+        }
+    }
+
+    for (const [name, promptEntries] of promptByName.entries()) {
+        if (!extractByName.has(name)) {
+            continue;
+        }
+
+        const extractEntries = extractByName.get(name);
+        for (const entry of promptEntries) {
+            pushIssue(
+                errors,
+                entry.filePath,
+                entry.line,
+                "Prompt",
+                entry.name,
+                `Prompt/Extract name collision for '${entry.name}'.`,
+                "prompt_extract_collision"
+            );
+        }
+
+        for (const entry of extractEntries) {
+            pushIssue(
+                errors,
+                entry.filePath,
+                entry.line,
+                "Extract",
+                entry.name,
+                `Prompt/Extract name collision for '${entry.name}'.`,
+                "prompt_extract_collision"
+            );
+        }
+    }
+
+    for (const [name, markEntries] of markByName.entries()) {
+        const distinctSources = new Set(
+            markEntries.map(entry => String(entry.source || "").toLowerCase())
+        );
+        if (markEntries.length > 1 && distinctSources.size > 1) {
+            for (const entry of markEntries.slice(1)) {
+                pushIssue(
+                    warnings,
+                    entry.filePath,
+                    entry.line,
+                    "Mark",
+                    entry.name,
+                    `Mark name '${entry.name}' is reused on different source images.`,
+                    "mark_name_reused"
+                );
+            }
+        }
+    }
+
+    for (const entries of markBySourceAndName.values()) {
+        if (entries.length > 1) {
+            for (const entry of entries.slice(1)) {
+                pushIssue(
+                    errors,
+                    entry.filePath,
+                    entry.line,
+                    "Mark",
+                    entry.name,
+                    `Duplicate Mark name '${entry.name}' on source '${entry.source}'.`,
+                    "duplicate_mark_name_same_source"
+                );
+            }
+        }
+    }
+
+    const producersByOutput = new Map();
+    for (const record of records) {
+        if (!record.outputPath) {
+            continue;
+        }
+
+        const key = record.outputPath.toLowerCase();
+        ensureBucket(producersByOutput, key).push(record);
+    }
+
+    for (const outputRecords of producersByOutput.values()) {
+        if (outputRecords.length <= 1) {
+            continue;
+        }
+
+        const operationList = outputRecords
+            .map(item => `${item.operation} ${item.name}`)
+            .join(", ");
+
+        for (const record of outputRecords) {
+            pushIssue(
+                errors,
+                record.filePath,
+                record.line,
+                record.operation,
+                record.name,
+                `Duplicate output target '${record.outputPath}' is produced by multiple blocks (${operationList}).`,
+                "duplicate_output_target"
+            );
+        }
+    }
+
+    const recordById = new Map();
+    const outgoingEdges = new Map();
+
+    for (const record of records) {
+        recordById.set(record.id, record);
+        outgoingEdges.set(record.id, new Set());
+    }
+
+    for (const record of records) {
+        for (const dependency of record.resolvedInputs) {
+            const dependencyKey = dependency.toLowerCase();
+            const producers = producersByOutput.get(dependencyKey) || [];
+
+            if (producers.length > 0) {
+                for (const producer of producers) {
+                    outgoingEdges.get(producer.id).add(record.id);
+                }
+                continue;
+            }
+
+            const directFile = app.vault.getAbstractFileByPath(dependency);
+            const candidateFile = app.vault.getAbstractFileByPath(`candidates/${dependency}`);
+            const isResolvedByFile = Boolean(
+                (directFile && directFile.stat) ||
+                (candidateFile && candidateFile.stat)
+            );
+
+            if (!isResolvedByFile) {
+                pushIssue(
+                    errors,
+                    record.filePath,
+                    record.line,
+                    record.operation,
+                    record.name,
+                    `Unresolved dependency '${dependency}'. Add or generate the dependency, or update the block reference.`,
+                    "unresolved_dependency"
+                );
+            }
+        }
+    }
+
+    const visitState = new Map();
+    const stack = [];
+    const cycleSignatures = new Set();
+
+    const reportCycle = cycleNodeIds => {
+        const cycleRecords = cycleNodeIds
+            .map(nodeId => recordById.get(nodeId))
+            .filter(Boolean);
+
+        if (cycleRecords.length === 0) {
+            return;
+        }
+
+        const signature = cycleRecords
+            .map(item => item.id)
+            .sort()
+            .join("|");
+
+        if (cycleSignatures.has(signature)) {
+            return;
+        }
+        cycleSignatures.add(signature);
+
+        const chain = cycleRecords
+            .map(item => `${item.operation}:${item.name}`)
+            .join(" -> ");
+        const first = cycleRecords[0];
+
+        pushIssue(
+            errors,
+            first.filePath,
+            first.line,
+            first.operation,
+            first.name,
+            `Dependency cycle detected: ${chain} -> ${first.operation}:${first.name}. Remove at least one dependency edge in the cycle.`,
+            "dependency_cycle"
+        );
+    };
+
+    const dfs = nodeId => {
+        visitState.set(nodeId, 1);
+        stack.push(nodeId);
+
+        const neighbors = outgoingEdges.get(nodeId) || new Set();
+        for (const neighborId of neighbors) {
+            const state = visitState.get(neighborId) || 0;
+
+            if (state === 0) {
+                dfs(neighborId);
+                continue;
+            }
+
+            if (state === 1) {
+                const cycleStart = stack.indexOf(neighborId);
+                if (cycleStart !== -1) {
+                    const cycleNodeIds = stack.slice(cycleStart);
+                    reportCycle(cycleNodeIds);
+                }
+            }
+        }
+
+        stack.pop();
+        visitState.set(nodeId, 2);
+    };
+
+    for (const record of records) {
+        if ((visitState.get(record.id) || 0) === 0) {
+            dfs(record.id);
+        }
+    }
+
+    const now = new Date().toISOString();
+    const lines = [];
+    lines.push("## GPTViz dependency report");
+    lines.push("");
+    lines.push(`Generated: ${now}`);
+    lines.push(`Config file: ${dependencyConfig.path} (${dependencyConfig.loaded ? "loaded" : "not found; scanning no files"})`);
+    lines.push(`Scanned markdown files: ${markdownFiles.length}`);
+    lines.push(`Parsed operations: ${records.length}`);
+    lines.push(`Errors: ${errors.length}`);
+    lines.push(`Warnings: ${warnings.length}`);
+    lines.push("");
+
+    const renderIssue = issue => {
+        const displayName = issue.filePath.split("/").pop() || issue.filePath;
+        return `- [[${issue.filePath}#${issue.operation} ${issue.name}|${displayName}]] line ${issue.line}: ${issue.message} [${issue.code}]`;
+    };
+
+    lines.push("## Errors");
+    if (errors.length === 0) {
+        lines.push("- None");
+    } else {
+        for (const issue of errors) {
+            lines.push(renderIssue(issue));
+        }
+    }
+
+    lines.push("");
+    lines.push("## Warnings");
+    if (warnings.length === 0) {
+        lines.push("- None");
+    } else {
+        for (const issue of warnings) {
+            lines.push(renderIssue(issue));
+        }
+    }
+
+    return {
+        errors,
+        warnings,
+        markdown: lines.join("\n"),
+        graph: {
+            records,
+            dependencyConfig,
+            markdownFiles: markdownFiles.map(file => file.path)
+        }
+    };
 };
 
 GPTViz.PromptAlignmentModal = class extends GPTViz.obsidian.Modal {
@@ -343,10 +1220,56 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
             text: detail
         }).style.whiteSpace = "pre-wrap";
 
-        const clearButton = contentEl.createEl("button", {
+        const actions = contentEl.createEl("div");
+        actions.style.display = "flex";
+        actions.style.gap = "0.6em";
+        actions.style.alignItems = "center";
+
+        const copyButton = actions.createEl("button", {
+            text: "Copy"
+        });
+
+        copyButton.addEventListener("click", async () => {
+            const payload = [
+                "GPTViz failure",
+                `Operation: ${this.context}`,
+                "",
+                detail
+            ].join("\n");
+
+            let copied = false;
+
+            try {
+                if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                    await navigator.clipboard.writeText(payload);
+                    copied = true;
+                }
+            } catch (error) {}
+
+            if (!copied) {
+                try {
+                    const textarea = document.createElement("textarea");
+                    textarea.value = payload;
+                    textarea.style.position = "fixed";
+                    textarea.style.left = "-9999px";
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    copied = document.execCommand("copy");
+                    textarea.remove();
+                } catch (error) {}
+            }
+
+            new GPTViz.obsidian.Notice(
+                copied
+                    ? "GPTViz: error copied to clipboard."
+                    : "GPTViz: could not copy automatically."
+            );
+        });
+
+        const clearButton = actions.createEl("button", {
             text: "Clear"
         });
-        clearButton.style.alignSelf = "flex-start";
         clearButton.addEventListener("click", () => this.close());
     }
 
@@ -373,8 +1296,14 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
     }
 };
 
-GPTViz.getImageCandidates = function(app, activeFile) {
-    const prefix = `${activeFile.basename}-`;
+GPTViz.getImageCandidates = function(app, activeFile, assetPath) {
+    const normalizedAssetPath = GPTViz.normalizeDependencyAssetPath(
+        assetPath || `${activeFile.basename}.png`,
+        ".png"
+    );
+    const assetName = normalizedAssetPath.split("/").pop() || `${activeFile.basename}.png`;
+    const assetBaseName = assetName.replace(/\.[^./]+$/, "");
+    const prefix = `${assetBaseName}-`;
     const candidates = [];
 
     for (const file of app.vault.getFiles()) {
@@ -424,11 +1353,15 @@ GPTViz.fileTimestampOptions = function(file) {
     };
 };
 
-GPTViz.ensureKeptImageCandidate = async function(app, activeFile) {
-    const keptFile = app.vault.getAbstractFileByPath(
-        `${activeFile.basename}.png`
+GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
+    const normalizedAssetPath = GPTViz.normalizeDependencyAssetPath(
+        assetPath || `${activeFile.basename}.png`,
+        ".png"
     );
-    const candidates = GPTViz.getImageCandidates(app, activeFile);
+    const keptFile = app.vault.getAbstractFileByPath(
+        normalizedAssetPath
+    );
+    const candidates = GPTViz.getImageCandidates(app, activeFile, normalizedAssetPath);
 
     if (!keptFile || !keptFile.extension) {
         return candidates;
@@ -464,10 +1397,12 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile) {
 
     await app.vault.createFolder("candidates").catch(() => {});
 
+    const assetName = normalizedAssetPath.split("/").pop() || `${activeFile.basename}.png`;
+    const assetBaseName = assetName.replace(/\.[^./]+$/, "");
     const number = candidates.length > 0
         ? candidates[candidates.length - 1].number + 1
         : 1;
-    const path = `candidates/${activeFile.basename}-${number}.png`;
+    const path = `candidates/${assetBaseName}-${number}.png`;
 
     try {
         await app.vault.createBinary(
@@ -478,7 +1413,8 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile) {
     } catch (error) {
         const refreshedCandidates = GPTViz.getImageCandidates(
             app,
-            activeFile
+            activeFile,
+            normalizedAssetPath
         );
 
         for (const candidate of refreshedCandidates) {
@@ -492,7 +1428,7 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile) {
         throw error;
     }
 
-    return GPTViz.getImageCandidates(app, activeFile);
+    return GPTViz.getImageCandidates(app, activeFile, normalizedAssetPath);
 };
 
 GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
@@ -507,7 +1443,49 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             }
         `;
         document.head.appendChild(this.candidateViewStyle);
+
         this.setCandidateViewActive(false);
+
+        this.dependencyOverlayStyle = document.createElement("style");
+        this.dependencyOverlayStyle.textContent = `
+            .gptviz-dependency-overlay {
+                position: fixed;
+                left: 50%;
+                bottom: 1rem;
+                transform: translateX(-50%);
+                max-width: min(92vw, 860px);
+                background: var(--background-primary);
+                border: 1px solid var(--background-modifier-border);
+                border-radius: 10px;
+                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+                z-index: calc(var(--layer-modal) - 1);
+                padding: 0.65rem 0.8rem;
+                display: flex;
+                align-items: center;
+                gap: 0.7rem;
+            }
+
+            .gptviz-dependency-overlay.is-hidden {
+                display: none;
+            }
+
+            .gptviz-dependency-overlay__text {
+                flex: 1;
+                min-width: 0;
+                font-size: 0.9em;
+                line-height: 1.35;
+                word-break: break-word;
+            }
+
+            .gptviz-dependency-overlay__dismiss {
+                white-space: nowrap;
+            }
+        `;
+        document.head.appendChild(this.dependencyOverlayStyle);
+        this.dependencyOverlayEl = null;
+        this.dependencyOverlayTextEl = null;
+        this.latestDependencyOverlayText = "";
+        this.pendingDependencyOverlayText = "";
 
         this.lastGenerationDurationMs = null;
         this.lastMarkdownFilePath =
@@ -516,6 +1494,10 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         this.previousMarkdownLeaf = null;
         this.markdownReviewActions = new WeakSet();
         this.markdownReviewActionClass = "gptviz-review-images-action";
+        this.markdownMovieModeActionClass = "gptviz-movie-mode-action";
+        this.markdownDependencyActionClass = "gptviz-dependency-check-action";
+        this.sharedReviewActionClass = "gptviz-shared-review-action";
+        this.sharedDependencyActionClass = "gptviz-shared-dependency-action";
         this.errorModal = null;
         this.polishPromptCache = {};
         this.openCandidateViewPromise = null;
@@ -528,7 +1510,8 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         this.registerEvent(
             this.app.workspace.on("file-open", file => {
-                this.addMarkdownReviewActions();
+                this.syncAllModeRibbons();
+                this.maybeShowPendingDependencyOverlay(file);
 
                 if (file && file.extension === "md") {
                     this.rememberMarkdownFile(file);
@@ -546,11 +1529,13 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
                 if (isMarkdownView) {
                     this.rememberMarkdownFile(leaf.view.file);
-                    this.addMarkdownReviewActions();
+                    this.syncAllModeRibbons();
                     this.refreshCandidateViews().catch(error => {
                         this.reportError("refreshing Candidate View after activating a Markdown file", error);
                     });
                 }
+
+                this.syncAllModeRibbons();
                 this.setCandidateViewActive(
                     this.isCandidateView(leaf && leaf.view)
                 );
@@ -559,7 +1544,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         this.registerEvent(
             this.app.workspace.on("layout-change", () => {
-                this.addMarkdownReviewActions();
+                this.syncAllModeRibbons();
             })
         );
 
@@ -577,8 +1562,11 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             })
         );
 
-        this.addMarkdownReviewActions();
+        this.registerDomEvent(document, "click", event => {
+            this.handleDependencyReportClick(event);
+        });
 
+        this.syncAllModeRibbons();
 
         this.addSettingTab(
             new GPTViz.SettingTab(this.app, this)
@@ -588,6 +1576,12 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             id: "gpt-check-dependencies",
             name: "GPTViz Check Dependencies",
             callback: async () => await this.checkDependencies()
+        });
+
+        this.addCommand({
+            id: "gpt-validate-dependency-headings",
+            name: "GPTViz Validate Dependency Headings",
+            callback: async () => await this.validateDependencyHeadings()
         });
 
         this.addCommand({
@@ -635,6 +1629,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         this.app.workspace.onLayoutReady(() => {
             this.debug("onLayoutReady fired.");
+            this.syncAllModeRibbons();
             this.rebuildCandidateViewAfterReload().catch(error => {
             this.reportError("recovering Candidate View after plugin reload", error);
             });
@@ -658,16 +1653,157 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         await this.appendLog(`\n${new Date().toISOString()}\n\n`);
     }
 
+    extractBundlePositionFromErrorDetail(detail) {
+        const text = String(detail || "");
+        const match = /main\.js:(\d+):(\d+)/.exec(text);
+
+        if (!match) {
+            return null;
+        }
+
+        const line = Number(match[1]);
+        const column = Number(match[2]);
+
+        if (!Number.isFinite(line) || !Number.isFinite(column)) {
+            return null;
+        }
+
+        return {
+            line,
+            column
+        };
+    }
+
+    async loadRuntimeCodeMap() {
+        if (this.runtimeCodeMapLoaded) {
+            return this.runtimeCodeMap;
+        }
+
+        this.runtimeCodeMapLoaded = true;
+        this.runtimeCodeMap = null;
+
+        const path = "gptviz/runtime-code-map.json";
+        const adapter = this.app.vault.adapter;
+
+        try {
+            if (!(await adapter.exists(path))) {
+                return null;
+            }
+
+            const text = await adapter.read(path);
+            const parsed = JSON.parse(text);
+
+            if (!parsed || !Array.isArray(parsed.entries)) {
+                return null;
+            }
+
+            const entries = parsed.entries
+                .map(entry => ({
+                    sourcePath: typeof entry?.sourcePath === "string" ? entry.sourcePath : "",
+                    sourceStartLine: Number(entry?.sourceStartLine),
+                    bundleStartLine: Number(entry?.bundleStartLine),
+                    bundleEndLine: Number(entry?.bundleEndLine)
+                }))
+                .filter(entry =>
+                    entry.sourcePath &&
+                    Number.isFinite(entry.sourceStartLine) &&
+                    Number.isFinite(entry.bundleStartLine) &&
+                    Number.isFinite(entry.bundleEndLine)
+                )
+                .sort((left, right) => left.bundleStartLine - right.bundleStartLine);
+
+            this.runtimeCodeMap = {
+                path,
+                entries
+            };
+
+            return this.runtimeCodeMap;
+        } catch (mapError) {
+            console.error("GPTViz could not load runtime-code-map.json", mapError);
+            return null;
+        }
+    }
+
+    resolveSourceLocationFromBundle(bundleLine, bundleColumn, codeMap) {
+        if (!codeMap || !Array.isArray(codeMap.entries)) {
+            return null;
+        }
+
+        const line = Number(bundleLine);
+        const column = Number(bundleColumn);
+
+        if (!Number.isFinite(line) || !Number.isFinite(column)) {
+            return null;
+        }
+
+        for (const entry of codeMap.entries) {
+            if (line < entry.bundleStartLine || line > entry.bundleEndLine) {
+                continue;
+            }
+
+            const lineOffset = line - entry.bundleStartLine;
+            return {
+                sourcePath: entry.sourcePath,
+                sourceLine: entry.sourceStartLine + lineOffset,
+                sourceColumn: column,
+                mapPath: codeMap.path
+            };
+        }
+
+        return null;
+    }
+
+    async writeLastRuntimeError(context, detail, now) {
+        const bundlePosition = this.extractBundlePositionFromErrorDetail(detail);
+        let bundleLocation = "Bundle location: unavailable";
+        let sourceLocation = "Source location: unresolved";
+
+        if (bundlePosition) {
+            bundleLocation = `Bundle location: .obsidian/plugins/gptviz/main.js:${bundlePosition.line}:${bundlePosition.column}`;
+            const codeMap = await this.loadRuntimeCodeMap();
+            const source = this.resolveSourceLocationFromBundle(
+                bundlePosition.line,
+                bundlePosition.column,
+                codeMap
+            );
+
+            if (source) {
+                sourceLocation = `Source location: ${source.sourcePath}:${source.sourceLine}:${source.sourceColumn} (map: ${source.mapPath})`;
+            } else if (codeMap) {
+                sourceLocation = `Source location: unresolved (map: ${codeMap.path})`;
+            }
+        }
+
+        const lastErrorPayload = [
+            "GPTViz failure",
+            `Project: gptviz`,
+            `Error type: runtime`,
+            `Generated: ${now}`,
+            `Operation: ${context}`,
+            bundleLocation,
+            sourceLocation,
+            "",
+            detail
+        ].join("\n");
+
+        await this.app.vault.adapter.write("_lastErr.log", `${lastErrorPayload}\n`);
+    }
+
     reportError(context, error) {
         const detail = error instanceof Error
             ? error.stack || error.message
             : String(error);
+        const now = new Date().toISOString();
         const message = `GPTViz ${context} failed: ${detail}`;
         console.error(message, error);
-        this.appendLog(
-            `ERROR [${new Date().toISOString()}] ${context}\n${detail}\n\n`
-        ).catch(logError => {
+
+        const logPayload = `ERROR [${now}] ${context}\n${detail}\n\n`;
+        this.appendLog(logPayload).catch(logError => {
             console.error("GPTViz could not write gptviz.log", logError);
+        });
+
+        this.writeLastRuntimeError(context, detail, now).catch(writeError => {
+            console.error("GPTViz could not write _lastErr.log", writeError);
         });
 
         if (this.errorModal) {
@@ -710,8 +1846,106 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         );
     }
 
+    async requestMovieMode(detail) {
+        const payload = {
+            source: detail && detail.source ? detail.source : "gptviz",
+            filePath: detail && detail.filePath ? detail.filePath : null,
+            requestedAt: new Date().toISOString()
+        };
+
+        const event = new CustomEvent("gptviz:movie-mode-request", {
+            detail: payload,
+            cancelable: true
+        });
+        const dispatchResult = window.dispatchEvent(event);
+
+        if (dispatchResult === false) {
+            return true;
+        }
+
+        const executeCommand = this.app?.commands?.executeCommandById;
+        if (typeof executeCommand === "function") {
+            const commandResult = await Promise.resolve(
+                executeCommand.call(this.app.commands, "movi-play-active-script")
+            );
+            if (commandResult === true) {
+                return true;
+            }
+        }
+
+        new GPTViz.obsidian.Notice(
+            "GPTViz: MovieMode is unavailable. Enable the movi plugin."
+        );
+        return false;
+    }
+
+    ensureDependencyOverlay() {
+        if (this.dependencyOverlayEl) {
+            return;
+        }
+
+        const overlay = document.createElement("div");
+        overlay.className = "gptviz-dependency-overlay is-hidden";
+
+        const textEl = document.createElement("div");
+        textEl.className = "gptviz-dependency-overlay__text";
+
+        const dismissButton = document.createElement("button");
+        dismissButton.className = "gptviz-dependency-overlay__dismiss";
+        dismissButton.textContent = "Dismiss";
+        dismissButton.addEventListener("click", () => {
+            this.hideDependencyErrorOverlay();
+        });
+
+        overlay.appendChild(textEl);
+        overlay.appendChild(dismissButton);
+        document.body.appendChild(overlay);
+
+        this.dependencyOverlayEl = overlay;
+        this.dependencyOverlayTextEl = textEl;
+    }
+
+    showDependencyErrorOverlay(text) {
+        // Disabled by request.
+        return;
+    }
+
+    hideDependencyErrorOverlay() {
+        // Disabled by request.
+        return;
+    }
+
+    formatDependencyIssueOverlayText(issue) {
+        // Disabled by request.
+        return "";
+    }
+
+    maybeShowPendingDependencyOverlay(file) {
+        // Disabled by request.
+        return;
+    }
+
+    handleDependencyReportClick(event) {
+        // Disabled by request.
+        return;
+    }
+
     onunload() {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
+                continue;
+            }
+
+            const viewActionsEl = view.containerEl.querySelector(".view-actions");
+            if (viewActionsEl) {
+                viewActionsEl.style.display = "";
+            }
+        }
+
         this.removeMarkdownReviewActions();
+        this.removeMarkdownMovieModeActions();
+        this.removeMarkdownDependencyActions();
         this.setCandidateViewActive(false);
 
         if (this.markdownReviewActionRefreshTimer) {
@@ -727,6 +1961,17 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         if (this.candidateViewStyle) {
             this.candidateViewStyle.remove();
             this.candidateViewStyle = null;
+        }
+
+        if (this.dependencyOverlayEl) {
+            this.dependencyOverlayEl.remove();
+            this.dependencyOverlayEl = null;
+            this.dependencyOverlayTextEl = null;
+        }
+
+        if (this.dependencyOverlayStyle) {
+            this.dependencyOverlayStyle.remove();
+            this.dependencyOverlayStyle = null;
         }
     }
 
@@ -758,6 +2003,110 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             lastMarkdownFilePath: this.lastMarkdownFilePath,
             lastCandidatePaths: this.lastCandidatePaths
         }).catch(() => {});
+    }
+
+    getSelectedCandidateAssetPath(markdownPath) {
+        if (!this.selectedCandidateAssetPathsByMarkdown) {
+            this.selectedCandidateAssetPathsByMarkdown = {};
+        }
+        return this.selectedCandidateAssetPathsByMarkdown[markdownPath] || "";
+    }
+
+    setSelectedCandidateAssetPath(markdownPath, assetPath) {
+        if (!markdownPath) {
+            return;
+        }
+
+        if (!this.selectedCandidateAssetPathsByMarkdown) {
+            this.selectedCandidateAssetPathsByMarkdown = {};
+        }
+
+        const normalized = GPTViz.normalizeDependencyAssetPath(assetPath, ".png");
+        if (!normalized) {
+            delete this.selectedCandidateAssetPathsByMarkdown[markdownPath];
+            if (this.selectedCandidateAssetSectionsByMarkdown) {
+                delete this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
+            }
+            return;
+        }
+
+        this.selectedCandidateAssetPathsByMarkdown[markdownPath] = normalized;
+    }
+
+    getSelectedCandidateAssetSection(markdownPath) {
+        if (!this.selectedCandidateAssetSectionsByMarkdown || !markdownPath) {
+            return null;
+        }
+
+        const section = this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
+        if (!section || !Number.isFinite(Number(section.startLine))) {
+            return null;
+        }
+
+        return {
+            startLine: Number(section.startLine),
+            endLine: Number(section.endLine),
+            assetPath: typeof section.assetPath === "string" ? section.assetPath : ""
+        };
+    }
+
+    setSelectedCandidateAssetSection(markdownPath, section) {
+        if (!markdownPath) {
+            return;
+        }
+
+        if (!this.selectedCandidateAssetSectionsByMarkdown) {
+            this.selectedCandidateAssetSectionsByMarkdown = {};
+        }
+
+        const startLine = Number(section && section.startLine);
+        const endLine = Number(section && section.endLine);
+        const assetPath = GPTViz.normalizeDependencyAssetPath(
+            section && section.assetPath ? section.assetPath : "",
+            ".png"
+        );
+
+        if (!Number.isFinite(startLine) || startLine < 0) {
+            delete this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
+            return;
+        }
+
+        this.selectedCandidateAssetSectionsByMarkdown[markdownPath] = {
+            startLine,
+            endLine: Number.isFinite(endLine) ? endLine : startLine + 1,
+            assetPath
+        };
+    }
+
+    getActiveCandidateAssetPath(file) {
+        if (!file || file.extension !== "md") {
+            return "";
+        }
+
+        const selected = this.getSelectedCandidateAssetPath(file.path);
+        if (selected) {
+            return selected;
+        }
+
+        return `${file.basename}.png`;
+    }
+
+    findLatestCandidatePathForAsset(file, assetPath) {
+        if (!file || file.extension !== "md") {
+            return "";
+        }
+
+        const normalized = GPTViz.normalizeDependencyAssetPath(assetPath, ".png");
+        if (!normalized) {
+            return "";
+        }
+
+        const candidates = GPTViz.getImageCandidates(this.app, file, normalized);
+        if (candidates.length === 0) {
+            return "";
+        }
+
+        return candidates[candidates.length - 1].file.path;
     }
 
     getCurrentMarkdownFile() {
@@ -817,14 +2166,30 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         return null;
     }
 
-    getCurrentPromptForFile(file) {
+    async getCurrentPromptForFile(file) {
         const editor = this.getMarkdownEditor(file);
         if (!editor) {
             return null;
         }
 
         const section = GPTViz.getPromptSection(editor);
-        return section ? GPTViz.getPromptParts(section).text : null;
+
+        if (!section) {
+            return null;
+        }
+
+        const resolvedSectionText = await GPTViz.expandIncludesInText(
+            this.app,
+            section.text,
+            file && file.path ? file.path : "",
+            [file && file.path ? file.path : "<inline>"],
+            8,
+            { disallowIncludedImagesTag: true }
+        );
+
+        return GPTViz.getPromptParts({
+            text: resolvedSectionText
+        }).text;
     }
 
     async alignMarkdownPrompt(file, savedPrompt) {
@@ -865,6 +2230,582 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         return this.getMarkdownEditor(this.getCurrentMarkdownFile());
     }
 
+    getModeRibbonForView(view) {
+        if (!view || !view.containerEl) {
+            return null;
+        }
+
+        const headerEl = view.containerEl.querySelector(".view-header");
+        if (!headerEl) {
+            return null;
+        }
+
+        let ribbon = headerEl.querySelector(".mode-ribbon");
+        if (ribbon) {
+            return ribbon;
+        }
+
+        ribbon = headerEl.createEl("div");
+        ribbon.classList.add("mode-ribbon");
+        ribbon.style.display = "inline-flex";
+        ribbon.style.alignItems = "center";
+        ribbon.style.gap = "0";
+        ribbon.style.marginInlineStart = "auto";
+
+        const actionsEl = headerEl.querySelector(".view-actions");
+        if (actionsEl) {
+            headerEl.insertBefore(ribbon, actionsEl);
+        } else {
+            headerEl.appendChild(ribbon);
+        }
+
+        return ribbon;
+    }
+
+    addModeButton(view, position, buttonEl) {
+        if (!Number.isInteger(position) || position < 0) {
+            throw new Error("addModeButton requires a non-negative integer position.");
+        }
+        if (!(buttonEl instanceof HTMLElement)) {
+            throw new Error("addModeButton requires buttonEl to be an HTMLElement.");
+        }
+
+        const ribbon = this.getModeRibbonForView(view);
+        if (!ribbon) {
+            return null;
+        }
+
+        const fallbackKey =
+            buttonEl.getAttribute("aria-label") ||
+            buttonEl.getAttribute("title") ||
+            (buttonEl.textContent || "").trim();
+        const buttonKey =
+            buttonEl.getAttribute("data-mode-button-key") ||
+            fallbackKey;
+
+        if (buttonKey) {
+            buttonEl.setAttribute("data-mode-button-key", buttonKey);
+            const existingByKey = ribbon.querySelectorAll(
+                `[data-mode-button-key="${CSS.escape(buttonKey)}"]`
+            );
+            existingByKey.forEach(existing => {
+                if (existing !== buttonEl) {
+                    existing.remove();
+                }
+            });
+        }
+
+        const existingAtPosition = ribbon.querySelector(
+            `[data-mode-button-position="${position}"]`
+        );
+        if (existingAtPosition && existingAtPosition !== buttonEl) {
+            existingAtPosition.remove();
+        }
+
+        buttonEl.setAttribute("data-mode-button-position", String(position));
+
+        const orderedButtons = [...ribbon.children].filter(
+            child => child !== buttonEl
+        );
+        const insertBefore = orderedButtons.find(child => {
+            const childPos = Number(
+                child.getAttribute("data-mode-button-position")
+            );
+            return Number.isFinite(childPos) && childPos > position;
+        });
+
+        if (insertBefore) {
+            ribbon.insertBefore(buttonEl, insertBefore);
+        } else {
+            ribbon.appendChild(buttonEl);
+        }
+
+        return buttonEl;
+    }
+
+    ensureModeRibbonMoreActionsButton(view) {
+        if (!view || !view.containerEl) {
+            return;
+        }
+
+        const buttonEl = document.createElement("button");
+        buttonEl.classList.add("clickable-icon");
+        buttonEl.classList.add("gptviz-mode-more-actions");
+        buttonEl.setAttribute("aria-label", "More Actions");
+        buttonEl.setAttribute("title", "More Actions");
+        buttonEl.setAttribute("type", "button");
+        buttonEl.setAttribute("data-mode-button-key", "MoreActions");
+        GPTViz.obsidian.setIcon(buttonEl, "more-vertical");
+        buttonEl.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const liveActionsEl = view.containerEl.querySelector(".view-actions");
+            const liveOptionsActionEl = liveActionsEl
+                ? liveActionsEl.querySelector(
+                    '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
+                )
+                : null;
+
+            if (!liveOptionsActionEl) {
+                return;
+            }
+
+            liveOptionsActionEl.dispatchEvent(
+                new MouseEvent("click", {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                })
+            );
+        });
+
+        this.addModeButton(view, 99, buttonEl);
+    }
+
+    setModeButtonEnabled(buttonEl, enabled) {
+        if (!buttonEl) {
+            return;
+        }
+
+        if (enabled) {
+            buttonEl.classList.remove("is-disabled");
+            buttonEl.removeAttribute("aria-disabled");
+            buttonEl.style.pointerEvents = "";
+            buttonEl.style.opacity = "";
+            return;
+        }
+
+        buttonEl.classList.add("is-disabled");
+        buttonEl.setAttribute("aria-disabled", "true");
+        buttonEl.style.pointerEvents = "none";
+        buttonEl.style.opacity = "0.45";
+    }
+
+    getModeRibbonButton(view, key) {
+        if (!view || !view.containerEl || !key) {
+            return null;
+        }
+
+        return view.containerEl.querySelector(
+            `.mode-ribbon [data-mode-button-key="${CSS.escape(key)}"]`
+        );
+    }
+
+    applyModeRibbonButtonVisualsForView(view) {
+        if (!view || !view.containerEl) {
+            return;
+        }
+
+        const ribbon = view.containerEl.querySelector(".mode-ribbon");
+        if (!ribbon) {
+            return;
+        }
+
+        const ribbonButtons = ribbon.querySelectorAll(".clickable-icon");
+        if (!ribbonButtons.length) {
+            return;
+        }
+
+        const sourceButton = view.containerEl.querySelector(".view-actions .clickable-icon") ||
+            document.querySelector(".view-actions .clickable-icon");
+
+        let targetWidth = 29;
+        let targetHeight = 29;
+        const backgroundColor = "var(--interactive-normal)";
+        const border = "1px solid var(--background-modifier-border)";
+        let borderRadius = "var(--radius-s)";
+        const boxShadow = "none";
+
+        if (sourceButton) {
+            const sourceStyle = window.getComputedStyle(sourceButton);
+            const sourceWidth = Number.parseFloat(sourceStyle.width);
+            const sourceHeight = Number.parseFloat(sourceStyle.height);
+            const sourceRect = sourceButton.getBoundingClientRect();
+
+            if (Number.isFinite(sourceWidth) && sourceWidth > 0) {
+                targetWidth = Math.round(sourceWidth);
+            } else if (Number.isFinite(sourceRect.width) && sourceRect.width > 0) {
+                targetWidth = Math.round(sourceRect.width);
+            }
+
+            if (Number.isFinite(sourceHeight) && sourceHeight > 0) {
+                targetHeight = Math.round(sourceHeight);
+            } else if (Number.isFinite(sourceRect.height) && sourceRect.height > 0) {
+                targetHeight = Math.round(sourceRect.height);
+            }
+
+            if (sourceStyle.borderRadius) {
+                borderRadius = sourceStyle.borderRadius;
+            }
+        }
+
+        targetWidth = Math.max(20, Math.min(targetWidth, 48));
+        targetHeight = Math.max(20, Math.min(targetHeight, 48));
+
+        const compactHeight = Math.max(16, targetHeight - 6);
+
+        ribbon.style.display = "inline-flex";
+        ribbon.style.alignItems = "center";
+        ribbon.style.gap = "0";
+        ribbon.style.overflow = "hidden";
+        ribbon.style.marginTop = "0";
+        ribbon.style.marginBottom = "0";
+        ribbon.style.height = `${compactHeight}px`;
+        ribbon.style.minHeight = `${compactHeight}px`;
+        ribbon.style.maxHeight = `${compactHeight}px`;
+        ribbon.style.backgroundColor = backgroundColor;
+        ribbon.style.border = border;
+        ribbon.style.borderRadius = borderRadius;
+        ribbon.style.boxShadow = boxShadow;
+
+        const sourceIconEl = sourceButton
+            ? sourceButton.querySelector("svg, .svg-icon")
+            : null;
+        const sourceIconStyle = sourceIconEl
+            ? window.getComputedStyle(sourceIconEl)
+            : null;
+        const sourceIconWidth = sourceIconStyle
+            ? Number.parseFloat(sourceIconStyle.width)
+            : NaN;
+        const sourceIconHeight = sourceIconStyle
+            ? Number.parseFloat(sourceIconStyle.height)
+            : NaN;
+
+        ribbonButtons.forEach((buttonEl, index) => {
+            const isLast = index === ribbonButtons.length - 1;
+
+            buttonEl.style.width = `${targetWidth}px`;
+            buttonEl.style.height = `${compactHeight}px`;
+            buttonEl.style.minWidth = `${targetWidth}px`;
+            buttonEl.style.minHeight = `${compactHeight}px`;
+            buttonEl.style.display = "inline-flex";
+            buttonEl.style.alignItems = "center";
+            buttonEl.style.justifyContent = "center";
+            buttonEl.style.boxSizing = "border-box";
+            buttonEl.style.padding = "0";
+            buttonEl.style.lineHeight = "1";
+            buttonEl.style.backgroundColor = "transparent";
+            buttonEl.style.border = "none";
+            buttonEl.style.borderRadius = "0";
+            buttonEl.style.boxShadow = "none";
+            buttonEl.style.margin = "0";
+            buttonEl.style.borderInlineEnd = isLast
+                ? "none"
+                : "1px solid var(--background-modifier-border)";
+
+            const iconEl = buttonEl.querySelector("svg, .svg-icon");
+            if (iconEl) {
+                if (Number.isFinite(sourceIconWidth) && sourceIconWidth > 0) {
+                    iconEl.style.width = `${sourceIconWidth}px`;
+                }
+                if (Number.isFinite(sourceIconHeight) && sourceIconHeight > 0) {
+                    iconEl.style.height = `${sourceIconHeight}px`;
+                }
+                iconEl.style.maxWidth = "none";
+                iconEl.style.maxHeight = "none";
+            }
+        });
+    }
+
+    applyModeRibbonButtonStatesForView(view, leaf) {
+        if (!view || !view.containerEl) {
+            return;
+        }
+
+        const isMarkdown = view instanceof GPTViz.obsidian.MarkdownView;
+        const isCandidate = this.isCandidateView(view);
+        const isMovie = this.isMoviPlayerView(view);
+
+        if (!isMarkdown && !isCandidate && !isMovie) {
+            return;
+        }
+
+        const markdownModeButtonEl = this.getModeRibbonButton(view, "MarkdownMode");
+        const imageModeButtonEl = this.getModeRibbonButton(view, "ImageMode");
+        const movieModeButtonEl = this.getModeRibbonButton(view, "MovieMode");
+        const dependsModeButtonEl = this.getModeRibbonButton(view, "DependsMode");
+        const moreActionsButtonEl = this.getModeRibbonButton(view, "MoreActions");
+
+        const hasMarkdownTarget = isMarkdown
+            ? Boolean(leaf)
+            : isCandidate
+                ? Boolean(view.activeFile)
+                : Boolean(this.resolveMovieSourceMarkdownFile(view));
+        this.setModeButtonEnabled(markdownModeButtonEl, hasMarkdownTarget);
+
+        let canOpenImageMode = true;
+        if (isMarkdown) {
+            canOpenImageMode = Boolean(view.file && this.markdownFileCanOpenCandidateView(view.file));
+        } else if (isMovie) {
+            const sourceFile = this.resolveMovieSourceMarkdownFile(view);
+            canOpenImageMode = Boolean(sourceFile && this.markdownFileCanOpenCandidateView(sourceFile));
+        } else if (isCandidate) {
+            canOpenImageMode = Boolean(view.activeFile && this.markdownFileCanOpenCandidateView(view.activeFile));
+        }
+        this.setModeButtonEnabled(imageModeButtonEl, canOpenImageMode);
+
+        this.setModeButtonEnabled(movieModeButtonEl, true);
+        this.setModeButtonEnabled(dependsModeButtonEl, true);
+
+        const actionsEl = view.containerEl.querySelector(".view-actions");
+        const optionsActionEl = actionsEl
+            ? actionsEl.querySelector(
+                '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
+            )
+            : null;
+        this.setModeButtonEnabled(moreActionsButtonEl, Boolean(optionsActionEl));
+    }
+
+    syncModeRibbonForView(view, leaf) {
+        if (!view || !view.containerEl) {
+            return;
+        }
+
+        const isMarkdown = view instanceof GPTViz.obsidian.MarkdownView;
+        const isCandidate = this.isCandidateView(view);
+        const isMovie = this.isMoviPlayerView(view);
+
+        if (!isMarkdown && !isCandidate && !isMovie) {
+            return;
+        }
+
+        const viewActionsEl = view.containerEl.querySelector(".view-actions");
+        if (viewActionsEl) {
+            viewActionsEl.style.display = isMarkdown ? "none" : "";
+        }
+
+        const markdownModeButtonEl = document.createElement("button");
+        markdownModeButtonEl.classList.add("clickable-icon");
+        markdownModeButtonEl.classList.add("gptviz-markdown-mode-action");
+        markdownModeButtonEl.setAttribute("aria-label", "MarkdownMode");
+        markdownModeButtonEl.setAttribute("title", "MarkdownMode");
+        markdownModeButtonEl.setAttribute("type", "button");
+        markdownModeButtonEl.setAttribute("data-mode-button-key", "MarkdownMode");
+        GPTViz.obsidian.setIcon(markdownModeButtonEl, "file-text");
+        markdownModeButtonEl.addEventListener("click", async () => {
+            try {
+                if (isCandidate && typeof view.returnToNote === "function") {
+                    await view.returnToNote();
+                    return;
+                }
+
+                if (isMovie) {
+                    await this.returnToMovieSourceNote(view);
+                    return;
+                }
+
+                if (leaf) {
+                    await this.app.workspace.revealLeaf(leaf);
+                }
+            } catch (error) {
+                this.reportError("switching to MarkdownMode", error);
+            }
+        });
+        this.addModeButton(view, 0, markdownModeButtonEl);
+
+        const imageModeButtonEl = document.createElement("button");
+        imageModeButtonEl.classList.add("clickable-icon");
+        imageModeButtonEl.classList.add(this.markdownReviewActionClass);
+        imageModeButtonEl.setAttribute("aria-label", "ImageMode");
+        imageModeButtonEl.setAttribute("title", "ImageMode");
+        imageModeButtonEl.setAttribute("type", "button");
+        imageModeButtonEl.setAttribute("data-mode-button-key", "ImageMode");
+        GPTViz.obsidian.setIcon(imageModeButtonEl, "image");
+        imageModeButtonEl.addEventListener("click", async () => {
+            try {
+                if (isMarkdown) {
+                    if (!this.markdownFileCanOpenCandidateView(view.file)) {
+                        return;
+                    }
+                    await this.handleMarkdownImageModeRequest(view.file, leaf);
+                    return;
+                }
+
+                if (isMovie) {
+                    await this.openCandidateViewForMovieSource(view);
+                    return;
+                }
+
+                if (isCandidate) {
+                    await this.handleMarkdownImageModeRequest(view.activeFile || null, leaf);
+                    return;
+                }
+            } catch (error) {
+                this.reportError("switching to ImageMode", error);
+            }
+        });
+
+        this.addModeButton(view, 2, imageModeButtonEl);
+
+        const movieModeButtonEl = document.createElement("button");
+        movieModeButtonEl.classList.add("clickable-icon");
+        movieModeButtonEl.classList.add(this.markdownMovieModeActionClass);
+        movieModeButtonEl.setAttribute("aria-label", "MovieMode");
+        movieModeButtonEl.setAttribute("title", "MovieMode");
+        movieModeButtonEl.setAttribute("type", "button");
+        movieModeButtonEl.setAttribute("data-mode-button-key", "MovieMode");
+        GPTViz.obsidian.setIcon(movieModeButtonEl, "film");
+        movieModeButtonEl.addEventListener("click", async () => {
+            try {
+                if (isMarkdown) {
+                    await this.handleMarkdownMovieModeRequest(view.file, leaf);
+                    return;
+                }
+
+                if (isCandidate) {
+                    const preferredAssetPath = this.getCandidateAssetPathForMovieMode(view);
+                    await this.handleMarkdownMovieModeRequest(
+                        view.activeFile || null,
+                        leaf,
+                        { preferredAssetPath }
+                    );
+                    return;
+                }
+
+                const filePath = this.resolveMovieSourceMarkdownFile(view)?.path || null;
+
+                await this.requestMovieMode({
+                    source: "movie-view",
+                    filePath
+                });
+            } catch (error) {
+                this.reportError("switching to MovieMode", error);
+            }
+        });
+        this.addModeButton(view, 3, movieModeButtonEl);
+
+        const dependencyActionEl = document.createElement("button");
+        dependencyActionEl.classList.add("clickable-icon");
+        dependencyActionEl.classList.add(this.markdownDependencyActionClass);
+        dependencyActionEl.setAttribute("aria-label", "DependsMode");
+        dependencyActionEl.setAttribute("title", "DependsMode");
+        dependencyActionEl.setAttribute("type", "button");
+        dependencyActionEl.setAttribute("data-mode-button-key", "DependsMode");
+        GPTViz.obsidian.setIcon(dependencyActionEl, "git-branch");
+        dependencyActionEl.addEventListener("click", async () => {
+            await this.validateDependencyHeadings();
+        });
+        this.addModeButton(view, 4, dependencyActionEl);
+
+        this.ensureModeRibbonMoreActionsButton(view);
+        this.applyModeRibbonButtonStatesForView(view, leaf);
+        this.applyModeRibbonButtonVisualsForView(view);
+    }
+
+    syncAllModeRibbons() {
+        const seenViews = new Set();
+
+        const syncLeafList = leafType => {
+            for (const leaf of this.app.workspace.getLeavesOfType(leafType)) {
+                const view = leaf && leaf.view;
+                if (!view || seenViews.has(view)) {
+                    continue;
+                }
+                seenViews.add(view);
+                this.syncModeRibbonForView(view, leaf);
+            }
+        };
+
+        syncLeafList("markdown");
+        syncLeafList(GPTViz.CANDIDATE_VIEW_TYPE);
+        syncLeafList("movi-player-view");
+    }
+
+    syncAllMarkdownModeRibbons() {
+        this.syncAllModeRibbons();
+    }
+
+    isMoviPlayerView(view) {
+        return view && typeof view.getViewType === "function" &&
+            view.getViewType() === "movi-player-view";
+    }
+
+    getMovieSourceMarkdownPath(view) {
+        if (view && view.movie && typeof view.movie.sourcePath === "string" && view.movie.sourcePath) {
+            return view.movie.sourcePath;
+        }
+        return this.lastMarkdownFilePath || "";
+    }
+
+    resolveMovieSourceMarkdownFile(view) {
+        const sourcePath = this.getMovieSourceMarkdownPath(view);
+        if (!sourcePath) {
+            return null;
+        }
+
+        const file = this.app.vault.getAbstractFileByPath(sourcePath);
+        if (!file || file.extension !== "md") {
+            return null;
+        }
+
+        return file;
+    }
+
+    async returnToMovieSourceNote(view) {
+        const sourceFile = this.resolveMovieSourceMarkdownFile(view);
+        if (!sourceFile) {
+            throw new Error("No movie source Markdown file is available.");
+        }
+
+        const markdownLeaf = this.app.workspace
+            .getLeavesOfType("markdown")
+            .find(leaf => leaf.view && leaf.view.file && leaf.view.file.path === sourceFile.path);
+
+        if (markdownLeaf) {
+            await this.app.workspace.revealLeaf(markdownLeaf);
+            return;
+        }
+
+        await this.app.workspace.getLeaf(true).openFile(sourceFile);
+    }
+
+    async openCandidateViewForMovieSource(view) {
+        const sourceFile = this.resolveMovieSourceMarkdownFile(view);
+        if (!sourceFile) {
+            throw new Error("No movie source Markdown file is available.");
+        }
+
+        this.rememberMarkdownFile(sourceFile);
+        await this.openCandidateView();
+    }
+
+    syncMovieModeRibbon(view) {
+        this.syncModeRibbonForView(view, null);
+    }
+
+    syncAllMovieModeRibbons() {
+        this.syncAllModeRibbons();
+    }
+
+    addSharedViewReviewActions() {
+        this.syncAllModeRibbons();
+    }
+
+    addSharedViewDependencyActions() {
+        this.syncAllModeRibbons();
+    }
+
+    removeMarkdownMovieModeActions() {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            const view = leaf.view;
+
+            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
+                continue;
+            }
+
+            view.containerEl
+                .querySelectorAll(
+                    `.${this.markdownMovieModeActionClass}, [aria-label="MovieMode"], [title="MovieMode"]`
+                )
+                .forEach(action => action.remove());
+        }
+    }
+
+    addMarkdownMovieModeActions() {
+        this.syncAllMarkdownModeRibbons();
+    }
+
     removeMarkdownReviewActions() {
         for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
             const view = leaf.view;
@@ -900,16 +2841,60 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     }
 
 
+    getCandidateAssetPathsForMarkdownFile(file) {
+        if (!file || file.extension !== "md") {
+            return [];
+        }
+
+        const assets = new Set();
+        assets.add(`${file.basename}.png`);
+
+        const selectedAssetPath = this.getSelectedCandidateAssetPath(file.path);
+        if (selectedAssetPath) {
+            assets.add(selectedAssetPath);
+        }
+
+        const cache = this.app.metadataCache.getFileCache(file);
+        const headings = Array.isArray(cache?.headings)
+            ? cache.headings
+            : [];
+
+        for (const heading of headings) {
+            const text = typeof heading?.heading === "string"
+                ? heading.heading.trim()
+                : "";
+            if (!text) {
+                continue;
+            }
+
+            const match = /^(Prompt|Extract)(?:[ \t]*:[ \t]*|[ \t]+)(.+)$/i.exec(text);
+            if (!match) {
+                continue;
+            }
+
+            const assetPath = GPTViz.normalizeDependencyAssetPath(match[2], ".png");
+            if (assetPath) {
+                assets.add(assetPath);
+            }
+        }
+
+        return [...assets];
+    }
+
     markdownFileHasKeptImage(file) {
         if (!file || file.extension !== "md") {
             return false;
         }
 
-        const keptFile = this.app.vault.getAbstractFileByPath(
-            `${file.basename}.png`
-        );
+        const assetPaths = this.getCandidateAssetPathsForMarkdownFile(file);
+        for (const assetPath of assetPaths) {
+            const keptFile = this.app.vault.getAbstractFileByPath(assetPath);
+            if (keptFile && keptFile.extension === "png") {
+                return true;
+            }
+        }
 
-        return Boolean(keptFile && keptFile.extension === "png");
+        return false;
     }
 
     markdownFileHasAnyCandidate(file) {
@@ -917,16 +2902,32 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             return false;
         }
 
-        const prefix = `${file.basename}-`;
+        const prefixes = this.getCandidateAssetPathsForMarkdownFile(file)
+            .map(assetPath => {
+                const name = String(assetPath || "").split("/").pop() || "";
+                const baseName = name.replace(/\.[^./]+$/, "");
+                return baseName ? `${baseName}-` : "";
+            })
+            .filter(Boolean);
+
+        if (prefixes.length === 0) {
+            return false;
+        }
 
         for (const vaultFile of this.app.vault.getFiles()) {
             if (
-                vaultFile.path.startsWith("candidates/") &&
-                vaultFile.extension === "png" &&
-                vaultFile.name.startsWith(prefix)
+                !vaultFile.path.startsWith("candidates/") ||
+                vaultFile.extension !== "png"
             ) {
-                const numberText = vaultFile.name.slice(prefix.length, -4);
+                continue;
+            }
 
+            for (const prefix of prefixes) {
+                if (!vaultFile.name.startsWith(prefix)) {
+                    continue;
+                }
+
+                const numberText = vaultFile.name.slice(prefix.length, -4);
                 if (/^[0-9]+$/.test(numberText)) {
                     return true;
                 }
@@ -942,23 +2943,415 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.markdownFileHasAnyCandidate(file);
     }
 
-    setMarkdownReviewActionEnabled(actionEl, enabled) {
-        if (!actionEl) {
+    markdownFileHasScriptHeading(file) {
+        if (!file || file.extension !== "md") {
+            return false;
+        }
+
+        const cache = this.app.metadataCache.getFileCache(file);
+        const headings = Array.isArray(cache?.headings)
+            ? cache.headings
+            : [];
+
+        return headings.some(heading =>
+            typeof heading?.heading === "string" &&
+            heading.heading.trim().toLowerCase().startsWith("script")
+        );
+    }
+
+    async getProducedTargetAssetsForMarkdownFile(file) {
+        if (!file || file.extension !== "md") {
+            return [];
+        }
+
+        const text = await this.app.vault.cachedRead(file);
+        const lines = String(text || "").split("\n");
+        const outputs = [];
+
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            const parsed = GPTViz.parseDependencyOperationHeading(lines[lineIndex]);
+            if (!parsed) {
+                continue;
+            }
+
+            if (parsed.operation === "Prompt" || parsed.operation === "Extract") {
+                const outputPath = GPTViz.normalizeDependencyAssetPath(parsed.name, ".png");
+                if (outputPath) {
+                    outputs.push(outputPath);
+                }
+                continue;
+            }
+
+            if (parsed.operation === "Mark") {
+                const outputPath = GPTViz.normalizeDependencyAssetPath(parsed.name, ".marks.json");
+                if (outputPath) {
+                    outputs.push(outputPath);
+                }
+            }
+        }
+
+        return [...new Set(outputs.map(value => String(value).toLowerCase()))];
+    }
+
+    async getMovieModeAssetRowsForMarkdownFile(file) {
+        if (!file || file.extension !== "md") {
+            return [];
+        }
+
+        const text = await this.app.vault.cachedRead(file);
+        const lines = String(text || "").split("\n");
+        const rows = [];
+
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            const parsed = GPTViz.parseDependencyOperationHeading(lines[lineIndex]);
+            if (!parsed) {
+                continue;
+            }
+
+            if (parsed.operation !== "Prompt" && parsed.operation !== "Extract") {
+                continue;
+            }
+
+            const assetPath = GPTViz.normalizeDependencyAssetPath(parsed.name, ".png");
+            if (!assetPath) {
+                continue;
+            }
+
+            const section = GPTViz.getHeadingSectionFromLines(lines, lineIndex);
+            rows.push({
+                operation: parsed.operation,
+                assetPath,
+                label: `${parsed.operation} ${assetPath}`,
+                filePath: file.path,
+                startLine: section ? section.startLine : lineIndex,
+                endLine: section ? section.endLine : (lineIndex + 1)
+            });
+        }
+
+        return rows;
+    }
+
+    getCursorLineForMovieMode(file, leaf) {
+        if (!file || file.extension !== "md") {
+            return -1;
+        }
+
+        const candidateViews = [];
+
+        if (
+            leaf &&
+            leaf.view instanceof GPTViz.obsidian.MarkdownView &&
+            leaf.view.file &&
+            leaf.view.file.path === file.path &&
+            leaf.view.editor
+        ) {
+            candidateViews.push(leaf.view);
+        }
+
+        const activeMarkdownView = this.app.workspace.getActiveViewOfType(
+            GPTViz.obsidian.MarkdownView
+        );
+        if (
+            activeMarkdownView &&
+            activeMarkdownView.file &&
+            activeMarkdownView.file.path === file.path &&
+            activeMarkdownView.editor
+        ) {
+            candidateViews.push(activeMarkdownView);
+        }
+
+        if (candidateViews.length === 0) {
+            return -1;
+        }
+
+        const line = Number(candidateViews[0].editor.getCursor().line);
+        return Number.isFinite(line) ? line : -1;
+    }
+
+    prioritizeMovieModeAssetRowsByCursor(rows, cursorLine) {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return [];
+        }
+
+        if (!Number.isFinite(cursorLine) || cursorLine < 0) {
+            return [...rows];
+        }
+
+        const preferredIndex = rows.findIndex(row =>
+            Number.isFinite(row.startLine) &&
+            Number.isFinite(row.endLine) &&
+            cursorLine >= row.startLine &&
+            cursorLine < row.endLine
+        );
+
+        if (preferredIndex <= 0) {
+            return [...rows];
+        }
+
+        const ordered = [...rows];
+        const [preferred] = ordered.splice(preferredIndex, 1);
+        ordered.unshift(preferred);
+        return ordered;
+    }
+
+    getCandidateAssetPathForMovieMode(view) {
+        if (!this.isCandidateView(view)) {
+            return "";
+        }
+
+        const index = Number(view.index);
+        const candidates = Array.isArray(view.candidates) ? view.candidates : [];
+        const candidate = Number.isFinite(index) && index >= 0 && index < candidates.length
+            ? candidates[index]
+            : null;
+        const name = candidate && candidate.file ? String(candidate.file.name || "") : "";
+        const match = /^(.+)-\d+\.png$/i.exec(name);
+
+        if (match && match[1]) {
+            return `${match[1]}.png`;
+        }
+
+        return "";
+    }
+
+    async showMovieScriptUsageForAssets(sourceFile, assetPaths, leaf) {
+        const normalizedAssets = [...new Set(
+            (Array.isArray(assetPaths) ? assetPaths : [])
+                .map(value => GPTViz.normalizeDependencyAssetPath(value, ""))
+                .filter(Boolean)
+        )];
+
+        const rows = await this.findMovieScriptsUsingAssets(
+            normalizedAssets,
+            sourceFile && sourceFile.path ? sourceFile.path : "",
+            { recursive: true }
+        );
+
+        new GPTViz.MovieScriptUsageModal(
+            this.app,
+            sourceFile,
+            rows,
+            async row => {
+                const scriptFile = this.app.vault.getAbstractFileByPath(row.path);
+                if (!scriptFile || scriptFile.extension !== "md") {
+                    new GPTViz.obsidian.Notice(`GPTViz: script note not found: ${row.path}`);
+                    return;
+                }
+
+                const existingScriptLeaf = this.app.workspace
+                    .getLeavesOfType("markdown")
+                    .find(candidateLeaf =>
+                        candidateLeaf.view &&
+                        candidateLeaf.view.file &&
+                        candidateLeaf.view.file.path === scriptFile.path
+                    );
+
+                if (existingScriptLeaf) {
+                    await this.app.workspace.revealLeaf(existingScriptLeaf);
+                    return;
+                }
+
+                await this.app.workspace.getLeaf(true).openFile(scriptFile);
+            }
+        ).open();
+    }
+
+    assetDependsOnTargets(assetPath, targets, inputMap, visited) {
+        const normalizedAsset = String(assetPath || "").toLowerCase();
+        if (!normalizedAsset) {
+            return false;
+        }
+
+        if (targets.has(normalizedAsset)) {
+            return true;
+        }
+
+        const seen = visited || new Set();
+        if (seen.has(normalizedAsset)) {
+            return false;
+        }
+        seen.add(normalizedAsset);
+
+        const inputs = inputMap.get(normalizedAsset);
+        if (!inputs || inputs.size === 0) {
+            return false;
+        }
+
+        for (const dep of inputs) {
+            if (this.assetDependsOnTargets(dep, targets, inputMap, seen)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    async findMovieScriptsUsingAssets(assetPaths, excludeFilePath, options) {
+        const targets = new Set(
+            (Array.isArray(assetPaths) ? assetPaths : [])
+                .map(value => String(value || "").toLowerCase())
+                .filter(Boolean)
+        );
+
+        if (targets.size === 0) {
+            return [];
+        }
+
+        const recursive = !options || options.recursive !== false;
+        const dependencyReport = await GPTViz.buildDependencyHeadingReport(this.app);
+        const records = Array.isArray(dependencyReport?.graph?.records)
+            ? dependencyReport.graph.records
+            : [];
+
+        const inputMap = new Map();
+        for (const record of records) {
+            const outputPath = String(record?.outputPath || "").toLowerCase();
+            if (!outputPath) {
+                continue;
+            }
+
+            if (!inputMap.has(outputPath)) {
+                inputMap.set(outputPath, new Set());
+            }
+
+            const bucket = inputMap.get(outputPath);
+            for (const value of Array.isArray(record?.resolvedInputs) ? record.resolvedInputs : []) {
+                const normalized = String(value || "").toLowerCase();
+                if (normalized) {
+                    bucket.add(normalized);
+                }
+            }
+        }
+
+        const rowsByPath = new Map();
+
+        for (const record of records) {
+            if (!record || record.operation !== "Script") {
+                continue;
+            }
+
+            if (excludeFilePath && record.filePath === excludeFilePath) {
+                continue;
+            }
+
+            const matches = [];
+            for (const dep of Array.isArray(record.resolvedInputs) ? record.resolvedInputs : []) {
+                const normalized = String(dep || "").toLowerCase();
+                const isMatch = targets.has(normalized) || (
+                    recursive && this.assetDependsOnTargets(normalized, targets, inputMap, new Set())
+                );
+
+                if (isMatch) {
+                    matches.push(dep);
+                }
+            }
+
+            if (matches.length === 0) {
+                continue;
+            }
+
+            const existing = rowsByPath.get(record.filePath);
+            if (!existing) {
+                rowsByPath.set(record.filePath, {
+                    name: record.fileName ? record.fileName.replace(/\.md$/i, "") : record.filePath,
+                    path: record.filePath,
+                    matches: [...new Set(matches)]
+                });
+                continue;
+            }
+
+            const merged = new Set([...(existing.matches || []), ...matches]);
+            existing.matches = [...merged];
+        }
+
+        return [...rowsByPath.values()].sort((left, right) => left.name.localeCompare(right.name));
+    }
+
+    async handleMarkdownImageModeRequest(file, leaf) {
+        if (!file || file.extension !== "md") {
+            await this.openCandidateView(null, leaf);
             return;
         }
 
-        if (enabled) {
-            actionEl.classList.remove("is-disabled");
-            actionEl.removeAttribute("aria-disabled");
-            actionEl.style.pointerEvents = "";
-            actionEl.style.opacity = "";
+        const assetRows = await this.getMovieModeAssetRowsForMarkdownFile(file);
+        if (assetRows.length === 0) {
+            await this.openCandidateView(null, leaf);
             return;
         }
 
-        actionEl.classList.add("is-disabled");
-        actionEl.setAttribute("aria-disabled", "true");
-        actionEl.style.pointerEvents = "none";
-        actionEl.style.opacity = "0.45";
+        const cursorLine = this.getCursorLineForMovieMode(file, leaf);
+        const orderedRows = this.prioritizeMovieModeAssetRowsByCursor(assetRows, cursorLine);
+
+        new GPTViz.MovieAssetUsageModal(
+            this.app,
+            file,
+            orderedRows,
+            async row => {
+                this.setSelectedCandidateAssetPath(file.path, row.assetPath);
+                this.setSelectedCandidateAssetSection(file.path, {
+                    startLine: row.startLine,
+                    endLine: row.endLine,
+                    assetPath: row.assetPath
+                });
+
+                const editor = this.getMarkdownEditor(file);
+                if (editor) {
+                    const currentLine = Number(editor.getCursor().line);
+                    const inSection = Number.isFinite(currentLine) &&
+                        currentLine >= row.startLine &&
+                        currentLine < row.endLine;
+                    if (!inSection) {
+                        editor.setCursor({ line: row.startLine, ch: 0 });
+                    }
+                }
+
+                const preferredCandidatePath = this.findLatestCandidatePathForAsset(
+                    file,
+                    row.assetPath
+                );
+                await this.openCandidateView(preferredCandidatePath || null, leaf);
+            }
+        ).open();
+    }
+
+    async handleMarkdownMovieModeRequest(file, leaf, options) {
+        if (!file || file.extension !== "md") {
+            await this.requestMovieMode({
+                source: "markdown-view",
+                filePath: file?.path || null
+            });
+            return;
+        }
+
+        if (this.markdownFileHasScriptHeading(file)) {
+            await this.requestMovieMode({
+                source: "markdown-view",
+                filePath: file.path
+            });
+            return;
+        }
+
+        const preferredAssetPath = options && typeof options.preferredAssetPath === "string"
+            ? options.preferredAssetPath
+            : "";
+
+        if (preferredAssetPath) {
+            await this.showMovieScriptUsageForAssets(file, [preferredAssetPath], leaf);
+            return;
+        }
+
+        const assetRows = await this.getMovieModeAssetRowsForMarkdownFile(file);
+        const cursorLine = this.getCursorLineForMovieMode(file, leaf);
+        const orderedRows = this.prioritizeMovieModeAssetRowsByCursor(assetRows, cursorLine);
+
+        new GPTViz.MovieAssetUsageModal(
+            this.app,
+            file,
+            orderedRows,
+            async row => {
+                await this.showMovieScriptUsageForAssets(file, [row.assetPath], leaf);
+            }
+        ).open();
     }
 
     scheduleMarkdownReviewActionStateRefresh() {
@@ -975,23 +3368,26 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     updateMarkdownReviewActionStates() {
         for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
             const view = leaf.view;
-
-            if (
-                !(view instanceof GPTViz.obsidian.MarkdownView) ||
-                !view.file
-            ) {
+            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
                 continue;
             }
+            this.applyModeRibbonButtonStatesForView(view, leaf);
+        }
 
-            const reviewEnabled = this.markdownFileCanOpenCandidateView(view.file);
-            const reviewActions = view.containerEl.querySelectorAll(
-                `.${this.markdownReviewActionClass}`
-            );
-            reviewActions.forEach(action => {
-                this.setMarkdownReviewActionEnabled(action, reviewEnabled);
-            });
+        for (const leaf of this.app.workspace.getLeavesOfType(GPTViz.CANDIDATE_VIEW_TYPE)) {
+            const view = leaf.view;
+            if (!this.isCandidateView(view)) {
+                continue;
+            }
+            this.applyModeRibbonButtonStatesForView(view, leaf);
+        }
 
-
+        for (const leaf of this.app.workspace.getLeavesOfType("movi-player-view")) {
+            const view = leaf.view;
+            if (!this.isMoviPlayerView(view)) {
+                continue;
+            }
+            this.applyModeRibbonButtonStatesForView(view, leaf);
         }
     }
 
@@ -1032,56 +3428,32 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     }
 
     addMarkdownReviewActions() {
+        this.syncAllMarkdownModeRibbons();
+    }
+
+    removeMarkdownDependencyActions() {
         for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
             const view = leaf.view;
 
-            if (
-                !(view instanceof GPTViz.obsidian.MarkdownView) ||
-                !view.file
-            ) {
+            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
                 continue;
             }
 
-            const existingActions = view.containerEl.querySelectorAll(
-                `.${this.markdownReviewActionClass}, [aria-label="Review images"], [title="Review images"], [aria-label="GPTViz Candidate View"], [title="GPTViz Candidate View"]`
-            );
-            existingActions.forEach(action => action.remove());
-
-            if (typeof view.addAction !== "function") {
-                continue;
-            }
-
-            const reviewActionEl = view.addAction(
-                "image",
-                "GPTViz Candidate View",
-                async () => {
-                    if (!this.markdownFileCanOpenCandidateView(view.file)) {
-                        return;
-                    }
-
-                    try {
-                        await this.openCandidateView(null, leaf);
-                    } catch (error) {
-                        this.reportError(
-                            "handling the Markdown image action",
-                            error
-                        );
-                    }
-                }
-            );
-
-            if (reviewActionEl) {
-                reviewActionEl.classList.add(this.markdownReviewActionClass);
-                reviewActionEl.setAttribute("aria-label", "GPTViz Candidate View");
-                reviewActionEl.setAttribute("title", "GPTViz Candidate View");
-                this.setMarkdownReviewActionEnabled(
-                    reviewActionEl,
-                    this.markdownFileCanOpenCandidateView(view.file)
-                );
-            }
-
-            this.enforceMarkdownActionOrder(view);
+            view.containerEl
+                .querySelectorAll(
+                    `.${this.markdownDependencyActionClass}, [aria-label="GPTViz Validate Dependencies"], [title="GPTViz Validate Dependencies"]`
+                )
+                .forEach(action => action.remove());
         }
+    }
+
+    enforceMarkdownDependencyActionOrder(view) {
+        // DependsMode is owned by .mode-ribbon ordering via addModeButton.
+        return;
+    }
+
+    addMarkdownDependencyActions() {
+        this.syncAllMarkdownModeRibbons();
     }
 
     isCandidateView(view) {
@@ -1100,7 +3472,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
     async rebuildCandidateViewAfterReload() {
         const workspace = this.app.workspace;
-        let candidateLeaves = workspace.getLeavesOfType(
+        const candidateLeaves = workspace.getLeavesOfType(
             GPTViz.CANDIDATE_VIEW_TYPE
         );
         const rememberedPath = this.getLastCandidatePath(
@@ -1117,15 +3489,11 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             );
         }
 
-        if (candidateLeaves.length === 0 && !rememberedPath) {
-            this.debug("reload recovery: no existing candidate leaf and no remembered candidate.");
-            return;
-        }
-
         if (candidateLeaves.length === 0) {
             this.debug(
-                `reload recovery: no existing candidate leaf; creating one for ${rememberedPath}.`
+                `reload recovery: no restored candidate leaf; skipping recreate to avoid replacing the active main view (rememberedPath=${rememberedPath || "<none>"}).`
             );
+            return;
         }
 
         const wasActive = candidateLeaves.some(
@@ -1133,28 +3501,29 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         );
         this.debug(`reload recovery: wasActive=${wasActive}, rememberedPath=${rememberedPath || "<none>"}`);
 
-        for (const leaf of candidateLeaves) {
-            leaf.detach();
+        const leaf = candidateLeaves[0];
+
+        for (const duplicateLeaf of candidateLeaves.slice(1)) {
+            duplicateLeaf.detach();
         }
-        if (candidateLeaves.length > 0) {
-            this.debug("reload recovery: old candidate leaf detached.");
+        if (candidateLeaves.length > 1) {
+            this.debug("reload recovery: duplicate candidate leaves detached.");
         }
 
-        const leaf = workspace.getLeaf("tab");
         await leaf.setViewState({
             type: GPTViz.CANDIDATE_VIEW_TYPE,
-            active: wasActive || candidateLeaves.length === 0
+            active: wasActive
         });
         this.debug(
-            `reload recovery: new leaf viewType=${typeof leaf.view?.getViewType === "function" ? leaf.view.getViewType() : "<none>"}, ` +
+            `reload recovery: rebuilt leaf viewType=${typeof leaf.view?.getViewType === "function" ? leaf.view.getViewType() : "<none>"}, ` +
             `constructor=${leaf.view?.constructor?.name || "<none>"}, ` +
             `hasRefresh=${typeof leaf.view?.refresh === "function"}`
         );
 
-        if (wasActive || candidateLeaves.length === 0) {
+        if (wasActive) {
             await workspace.revealLeaf(leaf);
             this.setCandidateViewActive(true);
-            this.debug("reload recovery: new leaf revealed.");
+            this.debug("reload recovery: rebuilt leaf revealed.");
         }
 
         if (
@@ -1166,7 +3535,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             await leaf.view.refresh(rememberedPath);
             this.debug("reload recovery: fresh view refresh completed.");
         } else {
-            this.debug("reload recovery: new leaf is not refreshable.");
+            this.debug("reload recovery: rebuilt leaf is not refreshable.");
         }
     }
 
@@ -1318,9 +3687,20 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             const targetPath = markdownView && markdownView.file
                 ? markdownView.file.path
                 : this.lastMarkdownFilePath;
+            const targetFile = targetPath
+                ? this.app.vault.getAbstractFileByPath(targetPath)
+                : null;
+            const targetAssetPath = targetFile && targetFile.extension === "md"
+                ? this.getActiveCandidateAssetPath(targetFile)
+                : "";
+            const currentAssetPath = GPTViz.normalizeDependencyAssetPath(
+                leaf.view.assetPath || "",
+                ".png"
+            );
             const needsRefresh = Boolean(preferredPath) ||
                 !leaf.view.activeFile ||
-                leaf.view.activeFile.path !== targetPath;
+                leaf.view.activeFile.path !== targetPath ||
+                (Boolean(targetAssetPath) && currentAssetPath !== targetAssetPath);
 
             if (needsRefresh) {
                 await leaf.view.refresh(preferredPath || rememberedPath);
@@ -1415,6 +3795,104 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         }
     }
 
+    async validateDependencyHeadings() {
+        try {
+            const report = await GPTViz.buildDependencyHeadingReport(this.app);
+            const reportPath = "_deps.md";
+            await this.app.vault.adapter.write(reportPath, report.markdown);
+
+            const reportFile = this.app.vault.getAbstractFileByPath(reportPath);
+            if (reportFile) {
+                const markdownLeaves = this.app.workspace.getLeavesOfType("markdown");
+                const existingLeaf = markdownLeaves.find(leaf =>
+                    leaf?.view instanceof GPTViz.obsidian.MarkdownView &&
+                    leaf.view.file &&
+                    leaf.view.file.path === reportFile.path
+                );
+
+                if (existingLeaf) {
+                    await this.app.workspace.revealLeaf(existingLeaf);
+                } else {
+                    const resultLeaf = markdownLeaves[0] || this.app.workspace.getMostRecentLeaf() || this.app.workspace.getLeaf(false);
+                    if (resultLeaf && typeof resultLeaf.openFile === "function") {
+                        await resultLeaf.openFile(reportFile);
+                    }
+                }
+            }
+
+            // Dependency bottom-overlay surfacing disabled by request.
+
+            const summary = `GPTViz: dependency validation wrote ${reportPath} (${report.errors.length} error${report.errors.length === 1 ? "" : "s"}, ${report.warnings.length} warning${report.warnings.length === 1 ? "" : "s"}).`;
+            new GPTViz.obsidian.Notice(summary);
+        } catch (error) {
+            this.reportError("validating dependency headings", error);
+        }
+    }
+
+    async resolveCompanionPromptForImagePath(imagePath, fallbackMarkdownFile) {
+        const normalizedImagePath = String(imagePath || "").trim();
+
+        const companionCandidates = [];
+
+        if (fallbackMarkdownFile && fallbackMarkdownFile.path) {
+            companionCandidates.push(fallbackMarkdownFile.path);
+        }
+
+        if (normalizedImagePath) {
+            if (normalizedImagePath.startsWith("candidates/") && fallbackMarkdownFile && fallbackMarkdownFile.path) {
+                companionCandidates.push(fallbackMarkdownFile.path);
+            }
+
+            const imageDirIndex = normalizedImagePath.lastIndexOf("/");
+            const imageDir = imageDirIndex === -1
+                ? ""
+                : normalizedImagePath.slice(0, imageDirIndex + 1);
+            const imageName = imageDirIndex === -1
+                ? normalizedImagePath
+                : normalizedImagePath.slice(imageDirIndex + 1);
+            const baseName = imageName.replace(/\.[^./]+$/, "");
+
+            if (baseName) {
+                companionCandidates.push(`${imageDir}${baseName}.md`);
+                companionCandidates.push(`${baseName}.md`);
+            }
+        }
+
+        const uniqueCandidates = [...new Set(companionCandidates.filter(Boolean))];
+
+        for (const companionPath of uniqueCandidates) {
+            const companionFile = this.app.vault.getAbstractFileByPath(companionPath);
+            if (!companionFile || companionFile.extension !== "md") {
+                continue;
+            }
+
+            const text = await this.app.vault.cachedRead(companionFile);
+            const promptSections = GPTViz.getPromptSectionsFromText(text);
+            if (promptSections.length === 0) {
+                continue;
+            }
+
+            const resolvedSectionText = await GPTViz.expandIncludesInText(
+                this.app,
+                promptSections[0].text,
+                companionFile.path,
+                [companionFile.path],
+                8,
+                { disallowIncludedImagesTag: true }
+            );
+            const prompt = GPTViz.getPromptParts({ text: resolvedSectionText }).text;
+
+            if (prompt && prompt.trim() !== "") {
+                return {
+                    prompt,
+                    companionPath: companionFile.path
+                };
+            }
+        }
+
+        return null;
+    }
+
     async polishActiveMarkdown(file, progressView, promptText) {
         const activeFile = file || this.getCurrentMarkdownFile();
 
@@ -1461,13 +3939,13 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         let generationStartedAt = 0;
 
         try {
-            const sourceBinary = await this.app.vault.readBinary(candidate.file);
-            const selectedCandidatePrompt = GPTViz.extractPromptFromPng(sourceBinary);
+            let sourceBinary = await this.app.vault.readBinary(candidate.file);
+            let selectedCandidatePrompt = GPTViz.extractPromptFromPng(sourceBinary);
             const promptParts = GPTViz.getPromptPartsFromText(executionPrompt);
             const imageNames = promptParts.imageNames.length > 0
                 ? promptParts.imageNames
                 : [candidate.file.path];
-            const loadedImages = await GPTViz.loadPromptImages(
+            let loadedImages = await GPTViz.loadPromptImages(
                 this.app,
                 imageNames
             );
@@ -1480,29 +3958,85 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 return;
             }
 
-            const sourcePrompt = loadedImages.sourcePrompts.find(
+            let sourcePrompt = loadedImages.sourcePrompts.find(
                 item => item.prompt !== null && item.prompt.trim() !== ""
             );
-            const originalPrompt = sourcePrompt
+            let originalPrompt = sourcePrompt
                 ? sourcePrompt.prompt
                 : selectedCandidatePrompt;
 
             if (originalPrompt === null || originalPrompt.trim() === "") {
-                new GPTViz.obsidian.Notice(
-                    `GPTViz: no original prompt found in source image for ${candidate.file.name}.`
+                const primarySourcePath = sourcePrompt
+                    ? sourcePrompt.path
+                    : (promptParts.imageNames.length > 0
+                        ? loadedImages.sourcePrompts[0]?.path
+                        : candidate.file.path);
+                const companionPrompt = await this.resolveCompanionPromptForImagePath(
+                    primarySourcePath,
+                    activeFile
                 );
-                return;
+
+                if (companionPrompt && companionPrompt.prompt) {
+                    const primarySourceFile = primarySourcePath
+                        ? this.app.vault.getAbstractFileByPath(primarySourcePath)
+                        : null;
+
+                    if (primarySourceFile && primarySourceFile.extension) {
+                        let primaryBinary = await this.app.vault.readBinary(primarySourceFile);
+                        primaryBinary = GPTViz.embedPromptInPng(
+                            primaryBinary,
+                            companionPrompt.prompt
+                        );
+                        await this.app.vault.modifyBinary(primarySourceFile, primaryBinary);
+
+                        if (primarySourcePath === candidate.file.path) {
+                            sourceBinary = primaryBinary;
+                            selectedCandidatePrompt = companionPrompt.prompt;
+                        }
+                    }
+
+                    loadedImages = {
+                        ...loadedImages,
+                        sourcePrompts: loadedImages.sourcePrompts.map(item => {
+                            if (item.path === primarySourcePath) {
+                                return {
+                                    ...item,
+                                    prompt: companionPrompt.prompt
+                                };
+                            }
+                            return item;
+                        })
+                    };
+                }
+
+                sourcePrompt = loadedImages.sourcePrompts.find(
+                    item => item.prompt !== null && item.prompt.trim() !== ""
+                );
+                originalPrompt = sourcePrompt
+                    ? sourcePrompt.prompt
+                    : selectedCandidatePrompt;
             }
+
+            if (originalPrompt === null || originalPrompt.trim() === "") {
+                originalPrompt = promptParts.text;
+            }
+
+            const targetAssetPath = progressView && progressView.assetPath
+                ? GPTViz.normalizeDependencyAssetPath(progressView.assetPath, ".png")
+                : this.getActiveCandidateAssetPath(activeFile);
+            const targetAssetName = targetAssetPath.split("/").pop() || `${activeFile.basename}.png`;
+            const targetAssetBaseName = targetAssetName.replace(/\.[^./]+$/, "");
 
             const existingCandidates = GPTViz.getImageCandidates(
                 this.app,
-                activeFile
+                activeFile,
+                targetAssetPath
             );
             const predictedNumber = existingCandidates.length > 0
                 ? existingCandidates[existingCandidates.length - 1].number + 1
                 : 1;
             const predictedCandidateName =
-                `${activeFile.basename}-${predictedNumber}.png`;
+                `${targetAssetBaseName}-${predictedNumber}.png`;
 
             generationStartedAt = Date.now();
             const estimatedDurationMs =
@@ -1548,13 +4082,14 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             const candidates = GPTViz.getImageCandidates(
                 this.app,
-                activeFile
+                activeFile,
+                targetAssetPath
             );
             const number = candidates.length > 0
                 ? candidates[candidates.length - 1].number + 1
                 : 1;
             const candidatePath =
-                `candidates/${activeFile.basename}-${number}.png`;
+                `candidates/${targetAssetBaseName}-${number}.png`;
             const binary = atob(result.imageBase64);
             const bytes = new Uint8Array(binary.length);
 
@@ -1623,22 +4158,35 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             return;
         }
 
-        const baseName = activeFile.basename;
+        const targetAssetPath = this.getActiveCandidateAssetPath(activeFile);
+        const targetAssetName = targetAssetPath.split("/").pop() || `${activeFile.basename}.png`;
+        const targetAssetBaseName = targetAssetName.replace(/\.[^./]+$/, "");
         const candidates = GPTViz.getImageCandidates(
             this.app,
-            activeFile
+            activeFile,
+            targetAssetPath
         );
         const number = candidates.length > 0
             ? candidates[candidates.length - 1].number + 1
             : 1;
-        const candidateName = `${baseName}-${number}.png`;
+        const candidateName = `${targetAssetBaseName}-${number}.png`;
 
         let progressOwner = progressView || this.getCandidateView();
         let cancelled = false;
         let generationStartedAt = 0;
 
         try {
-            const promptParts = GPTViz.getPromptParts(section);
+            const resolvedPromptSectionText = await GPTViz.expandIncludesInText(
+                this.app,
+                section.text,
+                activeFile.path,
+                [activeFile.path],
+                8,
+                { disallowIncludedImagesTag: true }
+            );
+            const promptParts = GPTViz.getPromptParts({
+                text: resolvedPromptSectionText
+            });
             const loadedImages = await GPTViz.loadPromptImages(
                 this.app,
                 promptParts.imageNames
@@ -1698,12 +4246,13 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             const saveCandidates = GPTViz.getImageCandidates(
                 this.app,
-                activeFile
+                activeFile,
+                targetAssetPath
             );
             const saveNumber = saveCandidates.length > 0
                 ? saveCandidates[saveCandidates.length - 1].number + 1
                 : 1;
-            const candidatePath = `candidates/${activeFile.basename}-${saveNumber}.png`;
+            const candidatePath = `candidates/${targetAssetBaseName}-${saveNumber}.png`;
             const binary = atob(result.imageBase64);
             const bytes = new Uint8Array(binary.length);
 
@@ -1935,9 +4484,18 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                     );
                 }
 
+                const resolvedExtractPrompt = await GPTViz.expandIncludesInText(
+                    this.app,
+                    block.prompt,
+                    activeFile.path,
+                    [`${activeFile.path}#Extract:${block.asset}`],
+                    8,
+                    { disallowIncludedImagesTag: true }
+                );
+
                 const response = await GPTViz.generateOpenAIImageResponseDetailed(
                     apiKey,
-                    block.prompt,
+                    resolvedExtractPrompt,
                     loaded.imageInputs
                 );
 
@@ -2034,6 +4592,15 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                     );
                 }
 
+                const resolvedMarkPrompt = await GPTViz.expandIncludesInText(
+                    this.app,
+                    block.prompt,
+                    activeFile.path,
+                    [`${activeFile.path}#Mark:${block.name}`],
+                    8,
+                    { disallowIncludedImagesTag: true }
+                );
+
                 const prompt = [
                     "Find one target point in the image.",
                     `Target name: ${block.name}`,
@@ -2044,7 +4611,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                     "- (0,0) is top-left, (1,1) is bottom-right.",
                     "- Use the exact target name.",
                     "Task:",
-                    block.prompt
+                    resolvedMarkPrompt
                 ].join("\n");
 
                 const responseText = await GPTViz.generateOpenAITextResponse(
@@ -2120,4 +4687,6 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 };
 
 module.exports = GPTViz.Plugin;
+
+
 

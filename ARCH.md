@@ -13,7 +13,7 @@ GPTViz is a plain-JavaScript Obsidian plugin designed to run on Android.
 
 Source files live directly in `vault/gptviz/`. The installed plugin lives in `vault/.obsidian/plugins/gptviz/`.
 
-`build.sh` concatenates all source `.js` files into the installed `main.js` and copies `manifest.json`.
+`build.sh` concatenates all source `.js` files into the installed `main.js`, copies `manifest.json`, and writes a project-local `runtime-code-map.json` sidecar in `gptviz/` for bundle-line-to-source-line runtime mapping.
 
 All source files must therefore be concatenation-safe and independent of filename order. Shared code uses the global `GPTViz` namespace. Do not use ES modules or local-file `require()` calls.
 
@@ -43,8 +43,8 @@ The Candidate View is a single logical workspace view with type `gptviz-candidat
 1. Finds any restored Candidate View leaves.
 2. Reads the remembered candidate path for `lastMarkdownFilePath`.
 3. Detaches duplicate or stale Candidate View leaves.
-4. If a remembered candidate exists but Obsidian restored no Candidate View leaf, creates a fresh leaf instead of giving up.
-5. Creates the view with `setViewState()`, reveals it when it is being recreated, assigns `view.plugin = this`, and performs a fresh refresh.
+4. If Obsidian restored no Candidate View leaf, skip recreate during reload recovery so the active main view is never replaced.
+5. Creates the view with `setViewState()`, reveals it only when the Candidate View was active before reload, assigns `view.plugin = this`, and performs a fresh refresh.
 6. Does nothing when there is neither a restored Candidate View nor a remembered candidate.
 
 This is intentionally separate from ordinary active-leaf refreshes: reload recovery must rebuild the view object because the old JavaScript view instance may no longer be usable after the plugin reload.

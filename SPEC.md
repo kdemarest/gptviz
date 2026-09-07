@@ -33,8 +33,11 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 ### Failure and logging contracts
 
 - Catastrophic failures are fail-loud: GPTViz shows a blocking error surface and logs details to `console.error()`.
+- The GPTViz failure surface includes a Copy action that copies operation + full error detail for sharing/debug.
 - Each plugin load appends a run marker to `gptviz.log`.
 - Reported runtime errors append timestamp, operation, message, and stack (when available) to `gptviz.log`.
+- Reported runtime errors also overwrite vault-root `_lastErr.log` with the latest failure payload, including project identity (`gptviz`), error type (`runtime`), timestamp, operation, and detail.
+- Build emits `gptviz/runtime-code-map.json` (bundle line ranges -> source file ranges); runtime error reporting uses it to include mapped source file/line/column in `_lastErr.log` when a bundle stack location is available.
 
 ### Project-local watcher isolation
 
@@ -48,8 +51,25 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 - `GPT show prompt`: resolves and reports the active Prompt section.
 - `GPTViz Image Integrity`: reports unresolved image references across markdown files.
 - `GPTViz Generate Image`: generates a new candidate image from Prompt (+ optional `Images:` inputs), supports in-view progress + cancel, embeds exact sent prompt in PNG metadata, and refreshes Candidate View on success.
-- `GPTViz Review Images`: opens persistent Candidate View with prev/next, keep, generate, polish, and markdown return controls; keeps state lightweight and avoids duplicate action registrations.
+- `GPTViz Review Images`: opens persistent Candidate View with prev/next, a middle jump-to-kept control, keep, generate, polish, and markdown return controls; Markdown `MarkdownMode` (file-text), `ImageMode` (GPTViz Candidate View icon), `MovieMode`, and `DependsMode` are in `.mode-ribbon` (not `.view-actions`), and Candidate View `Return to note` (file-text icon) is also in `.mode-ribbon`; returning to Markdown from Candidate View reveals the note, waits for markdown view readiness, targets the selected section line (or current cursor line), then vertically pans the markdown scroller so that line lands a few lines below the top of the editor viewport (clamped at file top to avoid overscroll); keeps state lightweight and avoids duplicate action registrations.
+- In Markdown and Candidate views, tapping `ImageMode` opens the same picker of Prompt/Extract asset headings from the active note (operation + asset label). Selecting an asset moves the markdown cursor to that heading section when needed, then opens/refreshes Candidate View targeted to that selected asset's candidate stream; when that stream has no candidates, Candidate View names that selected asset in the empty-state message.
+- Candidate View Generate/Polish operations use the currently selected asset stream (numbering and output candidate filename prefix), not the markdown filename basename.
+- `MovieMode` buttons are owned by gptviz in `.mode-ribbon` (Markdown + Candidate View) and request movie-view switching by dispatching `gptviz:movie-mode-request` (with command fallback to `movi-play-active-script` when no listener handles the event).
+- In Markdown view, when the active note has no `Script` heading, tapping `MovieMode` first opens a picker of Prompt/Extract output assets from that note (labels include operation + asset, for example `Prompt Aeku.png`); when the cursor is inside one of those sections, that section is listed first. Picking an asset opens a second picker of script notes whose dependencies reference that selected asset (recursive through dependency chains), and picking a script opens its source note (it does not auto-enter MovieMode playback).
+- In Candidate View, tapping `MovieMode` uses the currently selected candidate asset and opens the script-usage picker directly for that single asset, then opens script source on selection (no auto-playback).
+- Dependency consumers share one graph-construction path: MovieMode fallback queries the same dependency graph dataset used by dependency validation (including `_config.json` scope/exclude behavior), rather than rebuilding a separate ad hoc graph.
+- Candidate View provides a `.mode-ribbon` header container helper via `addModeButton(position, buttonEl)`: buttons are ordered by non-negative integer position, replacing any existing button at the same position; when a button with the same logical key is added again, the older instance is discarded and the new one is used.
+- `.mode-ribbon` includes a `More Actions` button that proxies the built-in `.view-actions` options (vertical ellipsis) menu, so the options menu is reachable from Mode Ribbon.
+- In Markdown view, header `.view-actions` is hidden; mode controls are provided through `.mode-ribbon`.
+- Mode Ribbon controls are reconciled idempotently by one shared gptviz ribbon sync path for Markdown, Candidate, and movi Player views; button creation/placement is centralized in one implementation.
+- Button enabled/disabled state is also centralized per view through one shared state-application path (not per-screen ad hoc toggles).
+- `More Actions` is always present in `.mode-ribbon`; it proxies the live options action when available and is otherwise shown disabled.
+- Mode Ribbon visuals are normalized in one shared path: the ribbon renders as one continuous segmented control with a single opaque surface, only outer corners rounded, and inner button dividers; button size matches live `.view-actions` icon-button size (with bounded fallback when unavailable).
+- On lifecycle/reload sync, gptviz reconciles the same five Mode Ribbon buttons on Markdown, Candidate, and movi Player leaves: MarkdownMode, ImageMode, MovieMode, DependsMode, and More Actions.
+- Plugin reload recovery does not steal focus or replace the active main view: GPTViz rebuilds/restores Candidate View only from already-restored candidate leaves, and only reveals it on reload when it was already the active leaf before reload.
 - `GPTViz Check Dependencies`: reports stale/missing prompt-image dependencies.
+- `GPTViz Validate Dependency Headings`: scans operation headings in either form (`Prompt|Extract|Mark|Script <name>` or `Prompt|Extract|Mark|Script: <name>`), validates naming/collision rules, treats default output extensions as optional for identity matching (`.png` for Prompt/Extract, `.marks.json` for Mark, `.ms` for Script), reads vault-root `_config.json` with `source_dirs` entries (`{ dir, recurse }`) to define scan scope, applies `exclude_files` patterns (exact match with `*` wildcard support), fails loudly on malformed `_config.json` (invalid JSON or invalid schema), resolves declared/default dependencies (`Images:`/`Photos:`, `Source:`), resolves `Script` dependencies via Movi parser-reported `requiredAssets` (not `Depends:` declarations), reports unresolved dependencies, duplicate produced output targets, and dependency cycles, does not treat Mark names as colliding with Prompt target names, writes a human-readable report to vault-root `_deps.md`, and opens that report in an available Markdown leaf.
+- Markdown `DependsMode` is a `.mode-ribbon` button (not `.view-actions`) that runs `GPTViz Validate Dependency Headings`. 
 - `GPTViz Mark (v0)`: parses `# Mark` blocks, requests normalized point JSON, writes `<basename>.marks.json`, and overlays labeled points on the kept image.
 - `GPTViz Extract (v0)`: parses `# Extract` blocks, runs image-edit generation using source image + extract prompt, removes keyed background color to alpha, and writes/overwrites each `Asset:` PNG target; from editor context, it runs only the block under the cursor when inside a `# Extract` block.
 
@@ -61,6 +81,11 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
   - if cursor is not inside a Prompt section, uses first Prompt section in file
 - Candidate numbering is file-derived only: next number is max existing PNG index in `candidates/` + 1; no stored counter.
 - Non-image API responses are shown to the user (text or readable JSON), do not save files, and do not consume candidate numbers.
+- Prompt/Extract/Mark prompt bodies support include directives: `{#include path/to/file.md}` and `{#include path/to/file.md#Heading}`.
+- Include resolution is recursive and in-place before model execution.
+- For `Prompt`, `Extract`, and `Mark` execution, included content must not contain `Images:`; this is a hard error to prevent fragile shared includes.
+- Heading includes resolve to content under the heading (until next same-or-higher heading).
+- Include failures are fail-loud and block execution: missing file, missing heading, include cycle, or depth overflow.
 - `Images:` supports comma-separated root paths and `candidates/` paths; extensionless names default to `.png`; warnings are aggregated and block request execution.
 - `Photos:` in Prompt is deprecated and blocks generation with a deprecation warning.
 
@@ -70,8 +95,42 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 - If candidate prompt metadata is missing/blank, GPTViz embeds the current initial markdown prompt before keep.
 - If candidate prompt metadata conflicts with current initial prompt, Keep asks: align prompt (Yes), keep without markdown change (No), or abort (Cancel).
 - Polish uses a non-modal in-view overlay, caches text per markdown file for the plugin session, seeds from vault-root `_polish.md` on first open when cache is blank, replaces `[[self]]` with selected source filename, and does not embed polish text into generated output.
+- Polish is non-blocking on missing source prompt metadata: if embedded prompt text is absent, GPTViz attempts companion-markdown prompt backfill+injection and always continues Polish; when backfill is unavailable, Polish still proceeds using the active Polish prompt context.
 
 ## Planned
+
+### Prompt include resolution (planned)
+
+GPTViz will support deterministic prompt include expansion before image generation.
+
+Scope:
+- applies to Prompt sections used by Generate/Polish flows
+- does not change AGENTS loading behavior
+
+Supported directives:
+- `{#include path/to/file.md}`
+- `{#include path/to/file.md#Heading}`
+
+Resolution contract:
+- resolve includes in-place before sending the prompt to the model
+- heading form includes content under that heading until the next same-or-higher heading
+- nested includes are supported
+- preserve resolved order exactly as encountered
+
+Safety and errors (fail loud):
+- missing file => error with source file + line
+- missing heading => error with source file + line
+- include cycle => error showing include chain
+- max include depth guard (configurable; default small)
+
+Observability:
+- on success, keep both raw prompt and fully resolved prompt available for review/debug
+- warnings are not silent substitutions; unresolved includes must block generation
+
+Non-goals for v0:
+- implicit `Group:` expansion
+- remote/network includes
+- variable templating DSL
 
 ### GPTExtract integration (planned)
 
