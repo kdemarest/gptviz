@@ -1,4 +1,4 @@
-var GPTViz = GPTViz || {};
+globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.parseHeading = function(line) {
     const match = /^(#+)[ \t]+(.+)$/.exec(line);

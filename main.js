@@ -1,4 +1,4 @@
-var GPTViz = GPTViz || {};
+globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
 
