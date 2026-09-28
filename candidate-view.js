@@ -180,230 +180,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         }
     }
 
-    ensureReturnToNoteAction() {
-        const existingActions = this.containerEl.querySelectorAll(
-            ".gptviz-return-to-note-action, [aria-label=\"Return to note\"], [title=\"Return to note\"]"
-        );
-        existingActions.forEach(action => action.remove());
-
-        const buttonEl = document.createElement("button");
-        buttonEl.classList.add("clickable-icon");
-        buttonEl.classList.add("gptviz-candidate-added-action");
-        buttonEl.classList.add("gptviz-return-to-note-action");
-        buttonEl.setAttribute("aria-label", "Return to note");
-        buttonEl.setAttribute("title", "Return to note");
-        buttonEl.setAttribute("type", "button");
-        buttonEl.setAttribute("data-mode-button-key", "MarkdownMode");
-        GPTViz.obsidian.setIcon(buttonEl, "file-text");
-        buttonEl.addEventListener("click", async () => {
-            try {
-                await this.returnToNote();
-            } catch (error) {
-                this.plugin.reportError("returning to the Markdown note", error);
-            }
-        });
-
-        this.addModeButton(0, buttonEl);
-    }
-
-    ensureMovieModeAction() {
-        const existingActions = this.containerEl.querySelectorAll(
-            ".gptviz-movie-mode-action, [aria-label=\"MovieMode\"], [title=\"MovieMode\"]"
-        );
-        existingActions.forEach(action => action.remove());
-
-        const buttonEl = document.createElement("button");
-        buttonEl.classList.add("clickable-icon");
-        buttonEl.classList.add("gptviz-candidate-added-action");
-        buttonEl.classList.add("gptviz-movie-mode-action");
-        buttonEl.setAttribute("aria-label", "MovieMode");
-        buttonEl.setAttribute("title", "MovieMode");
-        buttonEl.setAttribute("type", "button");
-        buttonEl.setAttribute("data-mode-button-key", "MovieMode");
-        GPTViz.obsidian.setIcon(buttonEl, "film");
-        buttonEl.addEventListener("click", async () => {
-            try {
-                await this.plugin.requestMovieMode({
-                    source: "candidate-view",
-                    filePath: this.activeFile?.path || null
-                });
-            } catch (error) {
-                this.plugin.reportError("switching to MovieMode", error);
-            }
-        });
-
-        this.addModeButton(3, buttonEl);
-    }
-
-    enforceCandidateActionOrder() {
-        const actionsEl = this.containerEl.querySelector(".view-actions");
-        if (!actionsEl) {
-            return;
-        }
-
-        const returnActionEl = actionsEl.querySelector(
-            ".gptviz-return-to-note-action"
-        );
-        if (!returnActionEl) {
-            return;
-        }
-
-        const systemToggler = actionsEl.querySelector(
-            '.view-action.mod-source-view, .view-action[aria-label*="Source mode"], .view-action[aria-label*="Live Preview"], .view-action[aria-label*="Reading view"], .view-action[aria-label*="Edit mode"]'
-        );
-
-        if (systemToggler) {
-            actionsEl.insertBefore(returnActionEl, systemToggler.nextSibling);
-            return;
-        }
-
-        const otherAddedAction = actionsEl.querySelector(
-            ".gptviz-candidate-added-action:not(.gptviz-return-to-note-action)"
-        );
-        if (otherAddedAction) {
-            actionsEl.insertBefore(returnActionEl, otherAddedAction);
-        }
-    }
-
-    getModeRibbon() {
-        const headerEl = this.containerEl.querySelector(".view-header");
-        if (!headerEl) {
-            return null;
-        }
-
-        let ribbon = headerEl.querySelector(".mode-ribbon");
-        if (ribbon) {
-            return ribbon;
-        }
-
-        ribbon = headerEl.createEl("div");
-        ribbon.classList.add("mode-ribbon");
-        ribbon.style.display = "inline-flex";
-        ribbon.style.alignItems = "center";
-        ribbon.style.gap = "0.25em";
-        ribbon.style.marginInlineStart = "auto";
-
-        const actionsEl = headerEl.querySelector(".view-actions");
-        if (actionsEl) {
-            headerEl.insertBefore(ribbon, actionsEl);
-        } else {
-            headerEl.appendChild(ribbon);
-        }
-
-        return ribbon;
-    }
-
-    addModeButton(position, buttonEl) {
-        if (!Number.isInteger(position) || position < 0) {
-            throw new Error("addModeButton requires a non-negative integer position.");
-        }
-        if (!(buttonEl instanceof HTMLElement)) {
-            throw new Error("addModeButton requires buttonEl to be an HTMLElement.");
-        }
-
-        const ribbon = this.getModeRibbon();
-        if (!ribbon) {
-            return null;
-        }
-
-        const fallbackKey =
-            buttonEl.getAttribute("aria-label") ||
-            buttonEl.getAttribute("title") ||
-            (buttonEl.textContent || "").trim();
-        const buttonKey =
-            buttonEl.getAttribute("data-mode-button-key") ||
-            fallbackKey;
-
-        if (buttonKey) {
-            buttonEl.setAttribute("data-mode-button-key", buttonKey);
-            const existingByKey = ribbon.querySelectorAll(
-                `[data-mode-button-key="${CSS.escape(buttonKey)}"]`
-            );
-            existingByKey.forEach(existing => {
-                if (existing !== buttonEl) {
-                    existing.remove();
-                }
-            });
-        }
-
-        const existingAtPosition = ribbon.querySelector(
-            `[data-mode-button-position="${position}"]`
-        );
-        if (existingAtPosition && existingAtPosition !== buttonEl) {
-            existingAtPosition.remove();
-        }
-
-        buttonEl.setAttribute("data-mode-button-position", String(position));
-
-        const orderedButtons = [...ribbon.children].filter(
-            child => child !== buttonEl
-        );
-        const insertBefore = orderedButtons.find(child => {
-            const childPos = Number(
-                child.getAttribute("data-mode-button-position")
-            );
-            return Number.isFinite(childPos) && childPos > position;
-        });
-
-        if (insertBefore) {
-            ribbon.insertBefore(buttonEl, insertBefore);
-        } else {
-            ribbon.appendChild(buttonEl);
-        }
-
-        return buttonEl;
-    }
-
-    ensureModeRibbonMoreActionsButton() {
-        const actionsEl = this.containerEl.querySelector(".view-actions");
-        const optionsActionEl = actionsEl
-            ? actionsEl.querySelector(
-                '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
-            )
-            : null;
-
-        if (!optionsActionEl) {
-            this.containerEl
-                .querySelectorAll('.gptviz-mode-more-actions, [data-mode-button-key="MoreActions"]')
-                .forEach(action => action.remove());
-            return;
-        }
-
-        const buttonEl = document.createElement("button");
-        buttonEl.classList.add("clickable-icon");
-        buttonEl.classList.add("gptviz-mode-more-actions");
-        buttonEl.setAttribute("aria-label", "More Actions");
-        buttonEl.setAttribute("title", "More Actions");
-        buttonEl.setAttribute("type", "button");
-        buttonEl.setAttribute("data-mode-button-key", "MoreActions");
-        GPTViz.obsidian.setIcon(buttonEl, "more-vertical");
-        buttonEl.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-
-            const liveActionsEl = this.containerEl.querySelector(".view-actions");
-            const liveOptionsActionEl = liveActionsEl
-                ? liveActionsEl.querySelector(
-                    '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
-                )
-                : null;
-
-            if (!liveOptionsActionEl) {
-                return;
-            }
-
-            liveOptionsActionEl.dispatchEvent(
-                new MouseEvent("click", {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                })
-            );
-        });
-
-        this.addModeButton(99, buttonEl);
-    }
-
     async returnToNote() {
         const activeFile = this.activeFile || this.plugin.getCurrentMarkdownFile();
 
@@ -684,11 +460,19 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.hasExtractBlocks = await this.plugin.hasExtractBlocksForFile(activeFile);
 
         this.assetPath = this.plugin.getActiveCandidateAssetPath(activeFile);
-        this.candidates = await GPTViz.ensureKeptImageCandidate(
-            this.app,
-            activeFile,
-            this.assetPath
-        );
+        try {
+            this.candidates = await GPTViz.ensureKeptImageCandidate(
+                this.app,
+                activeFile,
+                this.assetPath
+            );
+        } catch (error) {
+            this.plugin.reportError("loading candidate images", error);
+            contentEl.createEl("p", {
+                text: "GPTViz: could not load candidate images. See the error dialog for details."
+            });
+            return;
+        }
 
         if (this.plugin.debug) {
             this.plugin.debug(`view refresh candidates=${this.candidates.length}`);

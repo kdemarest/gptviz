@@ -1353,6 +1353,17 @@ GPTViz.fileTimestampOptions = function(file) {
     };
 };
 
+GPTViz.ensureFolder = async function(app, path) {
+    try {
+        await app.vault.createFolder(path);
+    } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        if (!/already exists/i.test(message)) {
+            throw error;
+        }
+    }
+};
+
 GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
     const normalizedAssetPath = GPTViz.normalizeDependencyAssetPath(
         assetPath || `${activeFile.basename}.png`,
@@ -1395,7 +1406,7 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
         );
     }
 
-    await app.vault.createFolder("candidates").catch(() => {});
+    await GPTViz.ensureFolder(app, "candidates");
 
     const assetName = normalizedAssetPath.split("/").pop() || `${activeFile.basename}.png`;
     const assetBaseName = assetName.replace(/\.[^./]+$/, "");
@@ -1985,7 +1996,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             ...this.settings,
             lastMarkdownFilePath: this.lastMarkdownFilePath,
             lastCandidatePaths: this.lastCandidatePaths
-        }).catch(() => {});
+        }).catch(error => this.reportError("saving GPTViz settings", error));
     }
 
     getLastCandidatePath(markdownPath) {
@@ -2002,7 +2013,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             ...this.settings,
             lastMarkdownFilePath: this.lastMarkdownFilePath,
             lastCandidatePaths: this.lastCandidatePaths
-        }).catch(() => {});
+        }).catch(error => this.reportError("saving GPTViz settings", error));
     }
 
     getSelectedCandidateAssetPath(markdownPath) {
@@ -3127,32 +3138,39 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             { recursive: true }
         );
 
+        const openScript = async row => {
+            const scriptFile = this.app.vault.getAbstractFileByPath(row.path);
+            if (!scriptFile || scriptFile.extension !== "md") {
+                new GPTViz.obsidian.Notice(`GPTViz: script note not found: ${row.path}`);
+                return;
+            }
+
+            const existingScriptLeaf = this.app.workspace
+                .getLeavesOfType("markdown")
+                .find(candidateLeaf =>
+                    candidateLeaf.view &&
+                    candidateLeaf.view.file &&
+                    candidateLeaf.view.file.path === scriptFile.path
+                );
+
+            if (existingScriptLeaf) {
+                await this.app.workspace.revealLeaf(existingScriptLeaf);
+                return;
+            }
+
+            await this.app.workspace.getLeaf(true).openFile(scriptFile);
+        };
+
+        if (rows.length === 1) {
+            await openScript(rows[0]);
+            return;
+        }
+
         new GPTViz.MovieScriptUsageModal(
             this.app,
             sourceFile,
             rows,
-            async row => {
-                const scriptFile = this.app.vault.getAbstractFileByPath(row.path);
-                if (!scriptFile || scriptFile.extension !== "md") {
-                    new GPTViz.obsidian.Notice(`GPTViz: script note not found: ${row.path}`);
-                    return;
-                }
-
-                const existingScriptLeaf = this.app.workspace
-                    .getLeavesOfType("markdown")
-                    .find(candidateLeaf =>
-                        candidateLeaf.view &&
-                        candidateLeaf.view.file &&
-                        candidateLeaf.view.file.path === scriptFile.path
-                    );
-
-                if (existingScriptLeaf) {
-                    await this.app.workspace.revealLeaf(existingScriptLeaf);
-                    return;
-                }
-
-                await this.app.workspace.getLeaf(true).openFile(scriptFile);
-            }
+            openScript
         ).open();
     }
 
@@ -3282,35 +3300,42 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         const cursorLine = this.getCursorLineForMovieMode(file, leaf);
         const orderedRows = this.prioritizeMovieModeAssetRowsByCursor(assetRows, cursorLine);
 
+        const selectRow = async row => {
+            this.setSelectedCandidateAssetPath(file.path, row.assetPath);
+            this.setSelectedCandidateAssetSection(file.path, {
+                startLine: row.startLine,
+                endLine: row.endLine,
+                assetPath: row.assetPath
+            });
+
+            const editor = this.getMarkdownEditor(file);
+            if (editor) {
+                const currentLine = Number(editor.getCursor().line);
+                const inSection = Number.isFinite(currentLine) &&
+                    currentLine >= row.startLine &&
+                    currentLine < row.endLine;
+                if (!inSection) {
+                    editor.setCursor({ line: row.startLine, ch: 0 });
+                }
+            }
+
+            const preferredCandidatePath = this.findLatestCandidatePathForAsset(
+                file,
+                row.assetPath
+            );
+            await this.openCandidateView(preferredCandidatePath || null, leaf);
+        };
+
+        if (orderedRows.length === 1) {
+            await selectRow(orderedRows[0]);
+            return;
+        }
+
         new GPTViz.MovieAssetUsageModal(
             this.app,
             file,
             orderedRows,
-            async row => {
-                this.setSelectedCandidateAssetPath(file.path, row.assetPath);
-                this.setSelectedCandidateAssetSection(file.path, {
-                    startLine: row.startLine,
-                    endLine: row.endLine,
-                    assetPath: row.assetPath
-                });
-
-                const editor = this.getMarkdownEditor(file);
-                if (editor) {
-                    const currentLine = Number(editor.getCursor().line);
-                    const inSection = Number.isFinite(currentLine) &&
-                        currentLine >= row.startLine &&
-                        currentLine < row.endLine;
-                    if (!inSection) {
-                        editor.setCursor({ line: row.startLine, ch: 0 });
-                    }
-                }
-
-                const preferredCandidatePath = this.findLatestCandidatePathForAsset(
-                    file,
-                    row.assetPath
-                );
-                await this.openCandidateView(preferredCandidatePath || null, leaf);
-            }
+            selectRow
         ).open();
     }
 
@@ -3343,6 +3368,11 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         const assetRows = await this.getMovieModeAssetRowsForMarkdownFile(file);
         const cursorLine = this.getCursorLineForMovieMode(file, leaf);
         const orderedRows = this.prioritizeMovieModeAssetRowsByCursor(assetRows, cursorLine);
+
+        if (orderedRows.length === 1) {
+            await this.showMovieScriptUsageForAssets(file, [orderedRows[0].assetPath], leaf);
+            return;
+        }
 
         new GPTViz.MovieAssetUsageModal(
             this.app,
@@ -4078,7 +4108,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.lastGenerationDurationMs =
                 Date.now() - generationStartedAt;
 
-            await this.app.vault.createFolder("candidates").catch(() => {});
+            await GPTViz.ensureFolder(this.app, "candidates");
 
             const candidates = GPTViz.getImageCandidates(
                 this.app,
@@ -4242,7 +4272,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.lastGenerationDurationMs =
                 Date.now() - generationStartedAt;
 
-            await this.app.vault.createFolder("candidates").catch(() => {});
+            await GPTViz.ensureFolder(this.app, "candidates");
 
             const saveCandidates = GPTViz.getImageCandidates(
                 this.app,
@@ -4396,7 +4426,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             current = current
                 ? `${current}/${segments[index]}`
                 : segments[index];
-            await this.app.vault.createFolder(current).catch(() => {});
+            await GPTViz.ensureFolder(this.app, current);
         }
     }
 
