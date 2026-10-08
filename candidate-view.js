@@ -320,7 +320,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         let initialText = this.plugin.polishPromptCache[cacheKey] || "";
         if (initialText.trim() === "") {
             const polishFile = this.app.vault.getAbstractFileByPath(
-                "_polish.md"
+                GPTViz.contentPath("_polish.md")
             );
 
             if (polishFile && polishFile.extension === "md") {
@@ -792,7 +792,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
     async findKeptCandidateIndex() {
         const keptFile = this.app.vault.getAbstractFileByPath(
-            this.assetPath || `${this.activeFile.basename}.png`
+            GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`)
         );
 
         if (!keptFile || !Array.isArray(this.candidates) || this.candidates.length === 0) {
@@ -835,7 +835,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         );
 
         const keptFile = this.app.vault.getAbstractFileByPath(
-            this.assetPath || `${this.activeFile.basename}.png`
+            GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`)
         );
         let isKept = false;
 
@@ -869,7 +869,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         }
 
         if (showMarkButton) {
-            const sidecarPath = `${this.activeFile.basename}.marks.json`;
+            const sidecarPath = GPTViz.contentPath(`${this.activeFile.basename}.marks.json`);
             try {
                 if (await this.app.vault.adapter.exists(sidecarPath)) {
                     const text = await this.app.vault.adapter.read(sidecarPath);
@@ -1014,7 +1014,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
         }
 
-        const path = this.assetPath || `${this.activeFile.basename}.png`;
+        const path = GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`);
         const keptFile = this.app.vault.getAbstractFileByPath(path);
 
         if (keptFile) {

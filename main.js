@@ -210,7 +210,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     debug() {}
 
     async appendLog(text) {
-        const path = "gptviz.log";
+        const path = "gptviz/gptviz.log";
         const adapter = this.app.vault.adapter;
 
         if (await adapter.exists(path)) {
@@ -357,7 +357,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             detail
         ].join("\n");
 
-        await this.app.vault.adapter.write("_lastErr.log", `${lastErrorPayload}\n`);
+        await this.app.vault.adapter.write("gptviz/_lastErr.log", `${lastErrorPayload}\n`);
     }
 
     reportError(context, error) {
@@ -919,7 +919,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         const assetPaths = this.getCandidateAssetPathsForMarkdownFile(file);
         for (const assetPath of assetPaths) {
-            const keptFile = this.app.vault.getAbstractFileByPath(assetPath);
+            const keptFile = this.app.vault.getAbstractFileByPath(GPTViz.contentPath(assetPath));
             if (keptFile && keptFile.extension === "png") {
                 return true;
             }
@@ -947,7 +947,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         for (const vaultFile of this.app.vault.getFiles()) {
             if (
-                !vaultFile.path.startsWith("candidates/") ||
+                !vaultFile.path.startsWith(GPTViz.contentPath("candidates/")) ||
                 vaultFile.extension !== "png"
             ) {
                 continue;
@@ -1746,7 +1746,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     async validateDependencyHeadings() {
         try {
             const report = await GPTViz.buildDependencyHeadingReport(this.app);
-            const reportPath = "_deps.md";
+            const reportPath = GPTViz.contentPath("_deps.md");
             await this.app.vault.adapter.write(reportPath, report.markdown);
 
             const reportFile = this.app.vault.getAbstractFileByPath(reportPath);
@@ -1787,7 +1787,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         }
 
         if (normalizedImagePath) {
-            if (normalizedImagePath.startsWith("candidates/") && fallbackMarkdownFile && fallbackMarkdownFile.path) {
+            if (normalizedImagePath.startsWith(GPTViz.contentPath("candidates/")) && fallbackMarkdownFile && fallbackMarkdownFile.path) {
                 companionCandidates.push(fallbackMarkdownFile.path);
             }
 
@@ -1802,7 +1802,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
             if (baseName) {
                 companionCandidates.push(`${imageDir}${baseName}.md`);
-                companionCandidates.push(`${baseName}.md`);
+                companionCandidates.push(GPTViz.contentPath(`${baseName}.md`));
             }
         }
 
@@ -2026,7 +2026,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.lastGenerationDurationMs =
                 Date.now() - generationStartedAt;
 
-            await GPTViz.ensureFolder(this.app, "candidates");
+            await GPTViz.ensureFolder(this.app, GPTViz.contentPath("candidates"));
 
             const candidates = GPTViz.getImageCandidates(
                 this.app,
@@ -2037,7 +2037,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 ? candidates[candidates.length - 1].number + 1
                 : 1;
             const candidatePath =
-                `candidates/${targetAssetBaseName}-${number}.png`;
+                GPTViz.contentPath(`candidates/${targetAssetBaseName}-${number}.png`);
             const binary = atob(result.imageBase64);
             const bytes = new Uint8Array(binary.length);
 
@@ -2190,7 +2190,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.lastGenerationDurationMs =
                 Date.now() - generationStartedAt;
 
-            await GPTViz.ensureFolder(this.app, "candidates");
+            await GPTViz.ensureFolder(this.app, GPTViz.contentPath("candidates"));
 
             const saveCandidates = GPTViz.getImageCandidates(
                 this.app,
@@ -2200,7 +2200,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             const saveNumber = saveCandidates.length > 0
                 ? saveCandidates[saveCandidates.length - 1].number + 1
                 : 1;
-            const candidatePath = `candidates/${targetAssetBaseName}-${saveNumber}.png`;
+            const candidatePath = GPTViz.contentPath(`candidates/${targetAssetBaseName}-${saveNumber}.png`);
             const binary = atob(result.imageBase64);
             const bytes = new Uint8Array(binary.length);
 
@@ -2466,8 +2466,8 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 const rawPng = GPTViz.base64ToArrayBuffer(response.imageBase64s[0]);
                 const outputPng = await GPTViz.removeKeyColorFromPng(rawPng);
 
-                await this.ensureParentFolders(block.asset);
-                await this.writeBinaryOverwrite(block.asset, outputPng);
+                await this.ensureParentFolders(GPTViz.contentPath(block.asset));
+                await this.writeBinaryOverwrite(GPTViz.contentPath(block.asset), outputPng);
                 writtenAssets.push(block.asset);
             }
 
@@ -2596,7 +2596,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
                 updatedAt: new Date().toISOString(),
                 marks
             };
-            const sidecarPath = `${activeFile.basename}.marks.json`;
+            const sidecarPath = GPTViz.contentPath(`${activeFile.basename}.marks.json`);
             await this.app.vault.adapter.write(
                 sidecarPath,
                 JSON.stringify(payload, null, 2)

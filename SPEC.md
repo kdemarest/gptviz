@@ -34,16 +34,10 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 
 - Catastrophic failures are fail-loud: GPTViz shows a blocking error surface and logs details to `console.error()`.
 - The GPTViz failure surface includes a Copy action that copies operation + full error detail for sharing/debug.
-- Each plugin load appends a run marker to `gptviz.log`.
-- Reported runtime errors append timestamp, operation, message, and stack (when available) to `gptviz.log`.
-- Reported runtime errors also overwrite vault-root `_lastErr.log` with the latest failure payload, including project identity (`gptviz`), error type (`runtime`), timestamp, operation, and detail.
-- Build emits `gptviz/runtime-code-map.json` (bundle line ranges -> source file ranges); runtime error reporting uses it to include mapped source file/line/column in `_lastErr.log` when a bundle stack location is available.
-
-### Project-local watcher isolation
-
-- Optional RunBash watcher is project-local to gptviz:
-  - scripts: `gptviz/watch-runbash.sh`, `gptviz/start-watcher.sh`, `gptviz/stop-watcher.sh`
-  - files: `gptviz/RunBash.ai`, `gptviz/RunBash.log`, `gptviz/RunBash.last.log`, `gptviz/.runbash-watcher.heartbeat`
+- Each plugin load appends a run marker to `gptviz/gptviz.log`.
+- Reported runtime errors append timestamp, operation, message, and stack (when available) to `gptviz/gptviz.log`.
+- Reported runtime errors also overwrite `gptviz/_lastErr.log` with the latest failure payload, including project identity (`gptviz`), error type (`runtime`), timestamp, operation, and detail.
+- Build emits `gptviz/runtime-code-map.json` (bundle line ranges -> source file ranges); runtime error reporting uses it to include mapped source file/line/column in `gptviz/_lastErr.log` when a bundle stack location is available.
 
 ### Commands and user-visible capabilities
 
@@ -68,7 +62,7 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 - On lifecycle/reload sync, gptviz reconciles the same five Mode Ribbon buttons on Markdown, Candidate, and movi Player leaves: MarkdownMode, ImageMode, MovieMode, DependsMode, and More Actions.
 - Plugin reload recovery does not steal focus or replace the active main view: GPTViz rebuilds/restores Candidate View only from already-restored candidate leaves, and only reveals it on reload when it was already the active leaf before reload.
 - `GPTViz Check Dependencies`: reports stale/missing prompt-image dependencies.
-- `GPTViz Validate Dependency Headings`: scans operation headings in either form (`Prompt|Extract|Mark|Script <name>` or `Prompt|Extract|Mark|Script: <name>`), validates naming/collision rules, treats default output extensions as optional for identity matching (`.png` for Prompt/Extract, `.marks.json` for Mark, `.ms` for Script), reads vault-root `_config.json` with `source_dirs` entries (`{ dir, recurse }`) to define scan scope, applies `exclude_files` patterns (exact match with `*` wildcard support), fails loudly on malformed `_config.json` (invalid JSON or invalid schema), resolves declared/default dependencies (`Images:`/`Photos:`, `Source:`), resolves `Script` dependencies via Movi parser-reported `requiredAssets` (not `Depends:` declarations), reports unresolved dependencies, duplicate produced output targets, and dependency cycles, does not treat Mark names as colliding with Prompt target names, writes a human-readable report to vault-root `_deps.md`, and opens that report in an available Markdown leaf.
+- `GPTViz Validate Dependency Headings`: scans operation headings in either form (`Prompt|Extract|Mark|Script <name>` or `Prompt|Extract|Mark|Script: <name>`), validates naming/collision rules, treats default output extensions as optional for identity matching (`.png` for Prompt/Extract, `.marks.json` for Mark, `.ms` for Script), reads `canvid/_config.json` (paths relative to `canvid/`) with `source_dirs` entries (`{ dir, recurse }`) to define scan scope, applies `exclude_files` patterns (exact match with `*` wildcard support), fails loudly on malformed `_config.json` (invalid JSON or invalid schema), resolves declared/default dependencies (`Images:`/`Photos:`, `Source:`), resolves `Script` dependencies via Movi parser-reported `requiredAssets` (not `Depends:` declarations), reports unresolved dependencies, duplicate produced output targets, and dependency cycles, does not treat Mark names as colliding with Prompt target names, writes a human-readable report to `canvid/_deps.md`, and opens that report in an available Markdown leaf.
 - Markdown `DependsMode` is a `.mode-ribbon` button (not `.view-actions`) that runs `GPTViz Validate Dependency Headings`. 
 - `GPTViz Mark (v0)`: parses `# Mark` blocks, requests normalized point JSON, writes `<basename>.marks.json`, and overlays labeled points on the kept image.
 - `GPTViz Extract (v0)`: parses `# Extract` blocks, runs image-edit generation using source image + extract prompt, removes keyed background color to alpha, and writes/overwrites each `Asset:` PNG target; from editor context, it runs only the block under the cursor when inside a `# Extract` block.
@@ -94,7 +88,7 @@ Goal: minimize token cost while preserving enough contract detail for safe futur
 - Keep preserves timestamps when promoting a candidate to the root kept image.
 - If candidate prompt metadata is missing/blank, GPTViz embeds the current initial markdown prompt before keep.
 - If candidate prompt metadata conflicts with current initial prompt, Keep asks: align prompt (Yes), keep without markdown change (No), or abort (Cancel).
-- Polish uses a non-modal in-view overlay, caches text per markdown file for the plugin session, seeds from vault-root `_polish.md` on first open when cache is blank, replaces `[[self]]` with selected source filename, and does not embed polish text into generated output.
+- Polish uses a non-modal in-view overlay, caches text per markdown file for the plugin session, seeds from `canvid/_polish.md` on first open when cache is blank, replaces `[[self]]` with selected source filename, and does not embed polish text into generated output.
 - Polish is non-blocking on missing source prompt metadata: if embedded prompt text is absent, GPTViz attempts companion-markdown prompt backfill+injection and always continues Polish; when backfill is unavailable, Polish still proceeds using the active Polish prompt context.
 
 ## Planned

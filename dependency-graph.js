@@ -3,7 +3,7 @@ globalThis.GPTViz = globalThis.GPTViz || {};
 GPTViz.findStaleDependencies = async function(app) {
     const rows = [];
 
-    for (const markdownFile of app.vault.getMarkdownFiles()) {
+    for (const markdownFile of app.vault.getMarkdownFiles().filter(GPTViz.isContentFile)) {
         const content = await app.vault.cachedRead(markdownFile);
         const imageNames = [];
 
@@ -17,7 +17,7 @@ GPTViz.findStaleDependencies = async function(app) {
 
         const newerDependencies = [];
         const outputFile = app.vault.getAbstractFileByPath(
-            `${markdownFile.basename}.png`
+            GPTViz.contentPath(`${markdownFile.basename}.png`)
         );
 
         for (const imageName of imageNames) {
@@ -25,7 +25,7 @@ GPTViz.findStaleDependencies = async function(app) {
                 ? imageName
                 : `${imageName}.png`;
             const dependencyFile =
-                app.vault.getAbstractFileByPath(dependencyPath);
+                app.vault.getAbstractFileByPath(GPTViz.contentPath(dependencyPath));
             const displayName = dependencyPath.replace(/\.[^./]+$/, "");
 
             if (!dependencyFile || !dependencyFile.stat) {
@@ -92,7 +92,7 @@ GPTViz.getImageTagReferences = function(text) {
 GPTViz.findInvalidImageReferences = async function(app) {
     const rows = [];
 
-    for (const markdownFile of app.vault.getMarkdownFiles()) {
+    for (const markdownFile of app.vault.getMarkdownFiles().filter(GPTViz.isContentFile)) {
         const content = await app.vault.cachedRead(markdownFile);
         const invalidImages = [];
 
@@ -141,7 +141,7 @@ GPTViz.normalizeDependencyConfigPath = function(value, asDirectory) {
 };
 
 GPTViz.loadDependencyValidationConfig = async function(app) {
-    const path = "_config.json";
+    const path = GPTViz.contentPath("_config.json");
     const adapter = app.vault.adapter;
 
     if (!(await adapter.exists(path))) {
@@ -264,7 +264,13 @@ GPTViz.matchesDependencyExcludePattern = function(filePath, pattern) {
 };
 
 GPTViz.isMarkdownFileAllowedForDependencyValidation = function(filePath, config) {
-    const normalizedPath = GPTViz.normalizeDependencyConfigPath(filePath, false);
+    // Config paths are relative to the content root.
+    const vaultPath = GPTViz.normalizeDependencyConfigPath(filePath, false);
+    const contentPrefix = GPTViz.contentPath("");
+    if (!vaultPath.startsWith(contentPrefix)) {
+        return false;
+    }
+    const normalizedPath = vaultPath.slice(contentPrefix.length);
     const excludedFiles = Array.isArray(config.excludedFiles)
         ? config.excludedFiles
         : [];
@@ -304,6 +310,17 @@ GPTViz.isMarkdownFileAllowedForDependencyValidation = function(filePath, config)
     }
 
     return false;
+};
+
+// Vault folder holding all content (markdown sources, kept images, candidates, config).
+GPTViz.CONTENT_ROOT = "canvid";
+
+GPTViz.contentPath = function(relativePath) {
+    return `${GPTViz.CONTENT_ROOT}/${relativePath}`;
+};
+
+GPTViz.isContentFile = function(file) {
+    return file.path.startsWith(GPTViz.contentPath(""));
 };
 
 GPTViz.normalizeDependencyAssetPath = function(value, fallbackExtension) {
@@ -735,8 +752,8 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
                 continue;
             }
 
-            const directFile = app.vault.getAbstractFileByPath(dependency);
-            const candidateFile = app.vault.getAbstractFileByPath(`candidates/${dependency}`);
+            const directFile = app.vault.getAbstractFileByPath(GPTViz.contentPath(dependency));
+            const candidateFile = app.vault.getAbstractFileByPath(GPTViz.contentPath(`candidates/${dependency}`));
             const isResolvedByFile = Boolean(
                 (directFile && directFile.stat) ||
                 (candidateFile && candidateFile.stat)
