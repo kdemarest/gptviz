@@ -96,6 +96,6 @@ GPTViz is a single-user developer tool. A failure must never look like a no-op a
 - Operations must not silently return when an expected Candidate View leaf, view type, or refresh method is missing. These are programmer errors and must throw descriptive exceptions.
 - Internal queue recovery may prevent a later refresh from being blocked by an earlier rejection, but it must not hide the original error from the user.
 - A successful callback that produces no visible Candidate View is also a failure condition; the relevant entry point must validate the resulting view and report an error.
-- Every plugin load starts a new run log entry in the vault-root `gptviz.log`, formatted as a blank line, the run date/time, and another blank line.
-- Every reported error is appended to `gptviz.log` with its date/time, operation context, message, and stack when available. Failure to write the log is sent to `console.error()` and must not recursively trigger error reporting.
+- Every plugin load starts a new run log entry in `gptviz/gptviz.log`, formatted as a blank line, the run date/time, and another blank line.
+- Every reported error is appended to `gptviz/gptviz.log` with its date/time, operation context, message, and stack when available. Failure to write the log is sent to `console.error()` and must not recursively trigger error reporting.
 - Log files are runtime artifacts and must be ignored by Git.

@@ -628,10 +628,10 @@ GPTViz.loadPromptImages = async function(app, imageNames) {
         const path = /\.[^./]+$/.test(imageName)
             ? imageName
             : `${imageName}.png`;
-        let file = app.vault.getAbstractFileByPath(path);
+        let file = app.vault.getAbstractFileByPath(GPTViz.contentPath(path));
 
         if (!file || !file.extension) {
-            file = app.vault.getAbstractFileByPath(`candidates/${path}`);
+            file = app.vault.getAbstractFileByPath(GPTViz.contentPath(`candidates/${path}`));
         }
 
         if (!file || !file.extension) {
