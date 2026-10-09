@@ -1,3 +1,4 @@
+unit("prompt", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.parseHeading = function(line) {
@@ -307,17 +308,10 @@ GPTViz.extractHeadingBodyFromText = function(text, headingName) {
     return lines.slice(startLine + 1, endLine).join("\n");
 };
 
-GPTViz.expandIncludesInText = async function(app, text, fromPath, stack, maxDepth, options) {
+GPTViz.expandIncludesInText = async function(app, text, fromPath, includeStack = [], depthLimit = 8, options = {}) {
     const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
     const output = [];
-    const includeStack = Array.isArray(stack) ? stack : [];
-    const depthLimit = Number.isFinite(Number(maxDepth))
-        ? Number(maxDepth)
-        : 8;
-    const includeOptions = options && typeof options === "object"
-        ? options
-        : {};
-    const disallowIncludedImagesTag = includeOptions.disallowIncludedImagesTag === true;
+    const disallowIncludedImagesTag = options.disallowIncludedImagesTag === true;
 
     if (includeStack.length > depthLimit) {
         throw new Error(
@@ -384,7 +378,8 @@ GPTViz.expandIncludesInText = async function(app, text, fromPath, stack, maxDept
                 ? error.message
                 : String(error);
             throw new Error(
-                `Include error at ${sourceLabel}:${sourceLine} - could not read ${resolvedPath}: ${message}`
+                `Include error at ${sourceLabel}:${sourceLine} - could not read ${resolvedPath}: ${message}`,
+                { cause: error }
             );
         }
 
@@ -420,7 +415,7 @@ GPTViz.expandIncludesInText = async function(app, text, fromPath, stack, maxDept
             resolvedPath,
             [...includeStack, includeKey],
             depthLimit,
-            includeOptions
+            options
         );
 
         output.push(expanded);
@@ -470,7 +465,7 @@ GPTViz.embedPromptInPng = function(binary, prompt) {
     const encoder = new TextEncoder();
     const keyword = encoder.encode("Prompt");
     const text = encoder.encode(
-        String(prompt || "").replace(/\u0000/g, "")
+        String(prompt || "").replaceAll("\0", "")
     );
     const data = new Uint8Array(
         keyword.length + 1 + 1 + 1 + 1 + 1 + text.length
@@ -1016,3 +1011,4 @@ GPTViz.parseMarkBlocksFromText = function(text, markdownFile) {
 
     return blocks;
 };
+});

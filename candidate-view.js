@@ -1,3 +1,4 @@
+unit("candidate-view", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
@@ -175,9 +176,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
     }
 
     syncModeRibbon() {
-        if (this.plugin && typeof this.plugin.syncModeRibbonForView === "function") {
-            this.plugin.syncModeRibbonForView(this, this.leaf || null);
-        }
+        this.plugin.syncModeRibbonForView(this);
     }
 
     async returnToNote() {
@@ -187,9 +186,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             throw new Error("No active Markdown file to return to.");
         }
 
-        const preferredSection = this.plugin && typeof this.plugin.getSelectedCandidateAssetSection === "function"
-            ? this.plugin.getSelectedCandidateAssetSection(activeFile.path)
-            : null;
+        const preferredSection = this.plugin.getSelectedCandidateAssetSection(activeFile.path);
 
         const waitForViewReady = async () => {
             await new Promise(resolve => window.setTimeout(resolve, 100));
@@ -197,20 +194,14 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
         const scrollEditorToCursor = async leaf => {
             const editor = leaf && leaf.view ? leaf.view.editor : null;
-            if (!editor || typeof editor.getCursor !== "function") {
+            if (!editor) {
                 return;
             }
 
-            let cursor = null;
-            try {
-                cursor = editor.getCursor();
-            } catch (error) {
-                cursor = null;
-            }
-
-            const currentLine = cursor ? Number(cursor.line) : NaN;
+            const cursor = editor.getCursor();
+            const currentLine = Number(cursor.line);
             const hasValidCursor = Number.isFinite(currentLine);
-            const currentCh = cursor ? Number(cursor.ch) : 0;
+            const currentCh = Number(cursor.ch);
             const sectionStart = preferredSection ? Number(preferredSection.startLine) : NaN;
             const sectionEnd = preferredSection ? Number(preferredSection.endLine) : NaN;
             const hasSection = Number.isFinite(sectionStart);
@@ -241,19 +232,18 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
                 return;
             }
 
-            if (typeof editor.setCursor === "function") {
-                try {
-                    editor.setCursor(targetCursor);
-                } catch (error) {
-                    const detail = error instanceof Error
-                        ? (error.stack || error.message)
-                        : String(error);
-                    throw new Error(
-                        "MarkdownMode cursor positioning failed: editor.setCursor threw for " +
-                        `${activeFile.path} at line ${targetCursor.line}, ch ${targetCursor.ch}. ` +
-                        `Reason: ${detail}`
-                    );
-                }
+            try {
+                editor.setCursor(targetCursor);
+            } catch (error) {
+                const detail = error instanceof Error
+                    ? (error.stack || error.message)
+                    : String(error);
+                throw new Error(
+                    "MarkdownMode cursor positioning failed: editor.setCursor threw for " +
+                    `${activeFile.path} at line ${targetCursor.line}, ch ${targetCursor.ch}. ` +
+                    `Reason: ${detail}`,
+                    { cause: error }
+                );
             }
 
             await new Promise(resolve => window.setTimeout(resolve, 50));
@@ -418,9 +408,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
     }
 
     async refreshNow(preferredPath) {
-        if (this.plugin.debug) {
-            this.plugin.debug(`view refresh start; preferredPath=${preferredPath || "<none>"}`);
-        }
 
         const contentEl = this.contentEl;
         this.polishOverlay = null;
@@ -444,9 +431,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.hasMarkBlocks = false;
         this.hasExtractBlocks = false;
 
-        if (this.plugin.debug) {
-            this.plugin.debug(`view refresh file=${activeFile ? activeFile.path : "<none>"}`);
-        }
 
         if (!activeFile) {
             this.createGenerateButton(contentEl);
@@ -474,9 +458,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             return;
         }
 
-        if (this.plugin.debug) {
-            this.plugin.debug(`view refresh candidates=${this.candidates.length}`);
-        }
 
         if (this.candidates.length === 0) {
             const noCandidatesAssetPath = this.assetPath || `${activeFile.basename}.png`;
@@ -783,9 +764,6 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
         await this.renderCurrentImage();
 
-        if (this.plugin.debug) {
-            this.plugin.debug(`view refresh rendered index=${this.index}, path=${this.candidates[this.index].file.path}`);
-        }
 
         this.syncModeRibbon();
     }
@@ -795,7 +773,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`)
         );
 
-        if (!keptFile || !Array.isArray(this.candidates) || this.candidates.length === 0) {
+        if (!keptFile || this.candidates.length === 0) {
             return -1;
         }
 
@@ -870,16 +848,17 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
         if (showMarkButton) {
             const sidecarPath = GPTViz.contentPath(`${this.activeFile.basename}.marks.json`);
-            try {
-                if (await this.app.vault.adapter.exists(sidecarPath)) {
-                    const text = await this.app.vault.adapter.read(sidecarPath);
-                    const data = JSON.parse(text);
-                    this.markPoints = Array.isArray(data.marks) ? data.marks : [];
-                } else {
-                    this.markPoints = [];
+            this.markPoints = [];
+            if (await this.app.vault.adapter.exists(sidecarPath)) {
+                try {
+                    const data = JSON.parse(await this.app.vault.adapter.read(sidecarPath));
+                    if (!Array.isArray(data.marks)) {
+                        throw new Error(`${sidecarPath} has no "marks" array.`);
+                    }
+                    this.markPoints = data.marks;
+                } catch (error) {
+                    this.plugin.reportError(`reading ${sidecarPath}`, error);
                 }
-            } catch (error) {
-                this.markPoints = [];
             }
         }
 
@@ -896,7 +875,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
     }
 
     async setMarks(marks) {
-        this.markPoints = Array.isArray(marks) ? marks : [];
+        this.markPoints = marks;
         this.renderMarkDots();
     }
 
@@ -907,7 +886,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
         this.markLayerEl.empty();
 
-        if (!Array.isArray(this.markPoints) || this.markPoints.length === 0) {
+        if (this.markPoints.length === 0) {
             return;
         }
 
@@ -1051,3 +1030,4 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
     }
 };
+});
