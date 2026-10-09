@@ -1,3 +1,4 @@
+unit("modals", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
@@ -115,8 +116,8 @@ GPTViz.MovieScriptUsageModal = class extends GPTViz.obsidian.Modal {
         super(app);
         this.app = app;
         this.sourceFile = sourceFile;
-        this.rows = Array.isArray(rows) ? rows : [];
-        this.onPick = typeof onPick === "function" ? onPick : null;
+        this.rows = rows;
+        this.onPick = onPick;
     }
 
     onOpen() {
@@ -182,8 +183,8 @@ GPTViz.MovieAssetUsageModal = class extends GPTViz.obsidian.Modal {
         super(app);
         this.app = app;
         this.sourceFile = sourceFile;
-        this.rows = Array.isArray(rows) ? rows : [];
-        this.onPick = typeof onPick === "function" ? onPick : null;
+        this.rows = rows;
+        this.onPick = onPick;
     }
 
     onOpen() {
@@ -231,6 +232,55 @@ GPTViz.MovieAssetUsageModal = class extends GPTViz.obsidian.Modal {
             item.createEl("div", {
                 text: row.filePath
             });
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+};
+
+// Compact, file-explorer-style list of the notes a note's resources come from.
+GPTViz.NoteResourcesModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, sourceFile, noteFiles, unresolvedAssets, onPick) {
+        super(app);
+        this.sourceFile = sourceFile;
+        this.noteFiles = noteFiles;
+        this.unresolvedAssets = unresolvedAssets;
+        this.onPick = onPick;
+    }
+
+    onOpen() {
+        const contentEl = this.contentEl;
+        contentEl.empty();
+        this.titleEl.textContent = `Resources used by ${this.sourceFile.basename}`;
+
+        if (this.noteFiles.length === 0 && this.unresolvedAssets.length === 0) {
+            contentEl.createEl("p", {
+                text: `${this.sourceFile.basename} uses no resources.`
+            });
+            return;
+        }
+
+        const list = contentEl.createDiv({ cls: "nav-files-container" });
+        list.style.maxHeight = "60vh";
+        list.style.overflowY = "auto";
+
+        for (const noteFile of this.noteFiles) {
+            const row = list.createDiv({ cls: "tree-item nav-file" })
+                .createDiv({ cls: "tree-item-self nav-file-title is-clickable" });
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: noteFile.basename });
+            row.addEventListener("click", async () => {
+                this.close();
+                await this.onPick(noteFile);
+            });
+        }
+
+        for (const asset of this.unresolvedAssets) {
+            const row = list.createDiv({ cls: "tree-item nav-file" })
+                .createDiv({ cls: "tree-item-self nav-file-title" });
+            row.style.color = "var(--text-faint)";
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: `${asset} (no note)` });
         }
     }
 
@@ -362,6 +412,7 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
                 detail
             ].join("\n");
 
+            // Clipboard support varies by WebView: try the API, then execCommand; the Notice reports the outcome.
             let copied = false;
 
             try {
@@ -369,7 +420,9 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
                     await navigator.clipboard.writeText(payload);
                     copied = true;
                 }
-            } catch (error) {}
+            } catch (error) {
+                // clipboard API refused; try the execCommand fallback
+            }
 
             if (!copied) {
                 try {
@@ -382,7 +435,9 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
                     textarea.select();
                     copied = document.execCommand("copy");
                     textarea.remove();
-                } catch (error) {}
+                } catch (error) {
+                    // fallback failed too; the Notice below says so
+                }
             }
 
             new GPTViz.obsidian.Notice(
@@ -420,3 +475,4 @@ GPTViz.ErrorModal = class extends GPTViz.obsidian.Modal {
         this.contentEl.empty();
     }
 };
+});

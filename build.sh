@@ -18,11 +18,14 @@ fi
 
 mkdir -p "$DEST"
 
-mapfile -t JS_FILES < <(
+# _preamble.js (unit/runUnits) goes first; every other file is a unit, so their order is irrelevant.
+mapfile -t UNIT_FILES < <(
   find . -maxdepth 1 -type f -name '*.js' \
     ! -name "$(basename "$STAGING_BUNDLE_PATH")" \
+    ! -name '_preamble.js' \
     | sort
 )
+JS_FILES=("./_preamble.js" "${UNIT_FILES[@]}")
 
 if [ "${#JS_FILES[@]}" -eq 0 ]; then
   echo "Build failed: no source .js files found in $(pwd)" >&2
@@ -70,6 +73,9 @@ EOF
   CURRENT_LINE=$((CURRENT_LINE + SOURCE_LINES + 1))
 done
 
+# Run every unit now that the whole bundle has loaded.
+printf 'runUnits();\n' >> "$STAGING_BUNDLE_PATH"
+
 GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 cat > "$MAP_PATH" <<EOF
 {
@@ -89,14 +95,8 @@ fi
 
 echo "Fast syntax check passed."
 
-SMOKE_SCRIPT="${GPTVIZ_SMOKE_SCRIPT:-./smoke.sh}"
-if [[ ! -f "$SMOKE_SCRIPT" ]]; then
-  echo "Build failed: smoke script not found at $SMOKE_SCRIPT" >&2
-  exit 1
-fi
-bash "$SMOKE_SCRIPT" "$STAGING_BUNDLE_PATH"
-
-echo "Smoke test passed."
+# Load test: construct the plugin and run onload/onunload against a fake Obsidian.
+node ../tools/jsload.js "$STAGING_BUNDLE_PATH" gptviz
 
 cp "$STAGING_BUNDLE_PATH" "$BUNDLE_PATH"
 

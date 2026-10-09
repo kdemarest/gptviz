@@ -1,6 +1,10 @@
+unit("ribbon", ["plugin"], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
+
+// Mode Ribbon: the one place that creates, places, enables, and removes ribbon buttons.
+GPTViz.MODE_RIBBON_KEYS = ["MarkdownMode", "ImageMode", "MovieMode", "DependsMode", "MoreActions"];
 
 Object.assign(GPTViz.Plugin.prototype, {
     getModeRibbonForView(view) {
@@ -109,28 +113,21 @@ Object.assign(GPTViz.Plugin.prototype, {
         buttonEl.setAttribute("type", "button");
         buttonEl.setAttribute("data-mode-button-key", "MoreActions");
         GPTViz.obsidian.setIcon(buttonEl, "more-vertical");
+        // Keep focus in the editor: taking focus hides the mobile keyboard, and the
+        // resulting resize closes the menu as soon as it opens.
+        buttonEl.addEventListener("mousedown", event => {
+            event.preventDefault();
+        });
         buttonEl.addEventListener("click", event => {
             event.preventDefault();
             event.stopPropagation();
 
-            const liveActionsEl = view.containerEl.querySelector(".view-actions");
-            const liveOptionsActionEl = liveActionsEl
-                ? liveActionsEl.querySelector(
-                    '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
-                )
-                : null;
+            // Build the pane menu directly, as Obsidian's own "More options" button does.
+            const menu = new GPTViz.obsidian.Menu();
+            view.onPaneMenu(menu, "more-options");
 
-            if (!liveOptionsActionEl) {
-                return;
-            }
-
-            liveOptionsActionEl.dispatchEvent(
-                new MouseEvent("click", {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                })
-            );
+            const rect = buttonEl.getBoundingClientRect();
+            menu.showAtPosition({ x: rect.right, y: rect.bottom });
         });
 
         this.addModeButton(view, 99, buttonEl);
@@ -281,7 +278,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         });
     },
 
-    applyModeRibbonButtonStatesForView(view, leaf) {
+    applyModeRibbonButtonStatesForView(view) {
         if (!view || !view.containerEl) {
             return;
         }
@@ -301,7 +298,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         const moreActionsButtonEl = this.getModeRibbonButton(view, "MoreActions");
 
         const hasMarkdownTarget = isMarkdown
-            ? Boolean(leaf)
+            ? Boolean(view.leaf)
             : isCandidate
                 ? Boolean(view.activeFile)
                 : Boolean(this.resolveMovieSourceMarkdownFile(view));
@@ -320,37 +317,48 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         this.setModeButtonEnabled(movieModeButtonEl, true);
         this.setModeButtonEnabled(dependsModeButtonEl, true);
-
-        const actionsEl = view.containerEl.querySelector(".view-actions");
-        const optionsActionEl = actionsEl
-            ? actionsEl.querySelector(
-                '.view-action.mod-options, .view-action[aria-label*="More options"], .view-action[aria-label*="Options"]'
-            )
-            : null;
-        this.setModeButtonEnabled(moreActionsButtonEl, Boolean(optionsActionEl));
+        this.setModeButtonEnabled(moreActionsButtonEl, true);
     },
 
-    syncModeRibbonForView(view, leaf) {
-        if (!view || !view.containerEl) {
+    isModeRibbonView(view) {
+        return view instanceof GPTViz.obsidian.MarkdownView ||
+            this.isCandidateView(view) ||
+            this.isMoviPlayerView(view);
+    },
+
+    // The single entry point for a view's ribbon. Idempotent: buttons are built once per
+    // plugin load and rebuilt only when the ribbon is from an older load or a button is
+    // missing. Every call refreshes enabled state from the one central place.
+    syncModeRibbonForView(view) {
+        if (!view || !view.containerEl || !this.isModeRibbonView(view)) {
             return;
         }
 
+        const ribbon = this.getModeRibbonForView(view);
+        if (!ribbon) {
+            return;
+        }
+
+        const isCurrent = ribbon.getAttribute("data-gptviz-load") === this.modeRibbonLoadId &&
+            GPTViz.MODE_RIBBON_KEYS.every(key => this.getModeRibbonButton(view, key));
+
+        if (!isCurrent) {
+            ribbon.empty();
+            ribbon.setAttribute("data-gptviz-load", this.modeRibbonLoadId);
+            this.buildModeRibbonButtons(view);
+        }
+
+        this.applyModeRibbonButtonStatesForView(view);
+        this.applyModeRibbonButtonVisualsForView(view);
+    },
+
+    buildModeRibbonButtons(view) {
         const isMarkdown = view instanceof GPTViz.obsidian.MarkdownView;
         const isCandidate = this.isCandidateView(view);
         const isMovie = this.isMoviPlayerView(view);
 
-        if (!isMarkdown && !isCandidate && !isMovie) {
-            return;
-        }
-
-        const viewActionsEl = view.containerEl.querySelector(".view-actions");
-        if (viewActionsEl) {
-            viewActionsEl.style.display = isMarkdown ? "none" : "";
-        }
-
         const markdownModeButtonEl = document.createElement("button");
         markdownModeButtonEl.classList.add("clickable-icon");
-        markdownModeButtonEl.classList.add("gptviz-markdown-mode-action");
         markdownModeButtonEl.setAttribute("aria-label", "MarkdownMode");
         markdownModeButtonEl.setAttribute("title", "MarkdownMode");
         markdownModeButtonEl.setAttribute("type", "button");
@@ -358,7 +366,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         GPTViz.obsidian.setIcon(markdownModeButtonEl, "file-text");
         markdownModeButtonEl.addEventListener("click", async () => {
             try {
-                if (isCandidate && typeof view.returnToNote === "function") {
+                if (isCandidate) {
                     await view.returnToNote();
                     return;
                 }
@@ -368,8 +376,14 @@ Object.assign(GPTViz.Plugin.prototype, {
                     return;
                 }
 
-                if (leaf) {
-                    await this.app.workspace.revealLeaf(leaf);
+                if (isMarkdown && (this.markdownFileHasScriptHeading(view.file) ||
+                    this.markdownFileHasPromptHeading(view.file))) {
+                    await this.showNoteResources(view.file, view.leaf);
+                    return;
+                }
+
+                if (view.leaf) {
+                    await this.app.workspace.revealLeaf(view.leaf);
                 }
             } catch (error) {
                 this.reportError("switching to MarkdownMode", error);
@@ -379,7 +393,6 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         const imageModeButtonEl = document.createElement("button");
         imageModeButtonEl.classList.add("clickable-icon");
-        imageModeButtonEl.classList.add(this.markdownReviewActionClass);
         imageModeButtonEl.setAttribute("aria-label", "ImageMode");
         imageModeButtonEl.setAttribute("title", "ImageMode");
         imageModeButtonEl.setAttribute("type", "button");
@@ -391,7 +404,7 @@ Object.assign(GPTViz.Plugin.prototype, {
                     if (!this.markdownFileCanOpenCandidateView(view.file)) {
                         return;
                     }
-                    await this.handleMarkdownImageModeRequest(view.file, leaf);
+                    await this.handleMarkdownImageModeRequest(view.file, view.leaf);
                     return;
                 }
 
@@ -401,19 +414,17 @@ Object.assign(GPTViz.Plugin.prototype, {
                 }
 
                 if (isCandidate) {
-                    await this.handleMarkdownImageModeRequest(view.activeFile || null, leaf);
+                    await this.handleMarkdownImageModeRequest(view.activeFile || null, view.leaf);
                     return;
                 }
             } catch (error) {
                 this.reportError("switching to ImageMode", error);
             }
         });
-
         this.addModeButton(view, 2, imageModeButtonEl);
 
         const movieModeButtonEl = document.createElement("button");
         movieModeButtonEl.classList.add("clickable-icon");
-        movieModeButtonEl.classList.add(this.markdownMovieModeActionClass);
         movieModeButtonEl.setAttribute("aria-label", "MovieMode");
         movieModeButtonEl.setAttribute("title", "MovieMode");
         movieModeButtonEl.setAttribute("type", "button");
@@ -422,7 +433,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         movieModeButtonEl.addEventListener("click", async () => {
             try {
                 if (isMarkdown) {
-                    await this.handleMarkdownMovieModeRequest(view.file, leaf);
+                    await this.handleMarkdownMovieModeRequest(view.file, view.leaf);
                     return;
                 }
 
@@ -430,7 +441,7 @@ Object.assign(GPTViz.Plugin.prototype, {
                     const preferredAssetPath = this.getCandidateAssetPathForMovieMode(view);
                     await this.handleMarkdownMovieModeRequest(
                         view.activeFile || null,
-                        leaf,
+                        view.leaf,
                         { preferredAssetPath }
                     );
                     return;
@@ -450,7 +461,6 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         const dependencyActionEl = document.createElement("button");
         dependencyActionEl.classList.add("clickable-icon");
-        dependencyActionEl.classList.add(this.markdownDependencyActionClass);
         dependencyActionEl.setAttribute("aria-label", "DependsMode");
         dependencyActionEl.setAttribute("title", "DependsMode");
         dependencyActionEl.setAttribute("type", "button");
@@ -462,113 +472,62 @@ Object.assign(GPTViz.Plugin.prototype, {
         this.addModeButton(view, 4, dependencyActionEl);
 
         this.ensureModeRibbonMoreActionsButton(view);
-        this.applyModeRibbonButtonStatesForView(view, leaf);
-        this.applyModeRibbonButtonVisualsForView(view);
     },
 
     syncAllModeRibbons() {
-        const seenViews = new Set();
-
-        const syncLeafList = leafType => {
-            for (const leaf of this.app.workspace.getLeavesOfType(leafType)) {
-                const view = leaf && leaf.view;
-                if (!view || seenViews.has(view)) {
-                    continue;
-                }
-                seenViews.add(view);
-                this.syncModeRibbonForView(view, leaf);
-            }
-        };
-
-        syncLeafList("markdown");
-        syncLeafList(GPTViz.CANDIDATE_VIEW_TYPE);
-        syncLeafList("movi-player-view");
+        this.app.workspace.iterateAllLeaves(leaf => {
+            this.syncModeRibbonForView(leaf.view);
+        });
     },
 
-    removeMarkdownMovieModeActions() {
-        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-            const view = leaf.view;
-
-            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
-                continue;
+    // Hides .view-actions in any header carrying a ribbon, and keeps the ribbon from
+    // shrinking (it clips overflow, so shrinking would hide its last buttons). Being a
+    // stylesheet rule, it survives Obsidian re-rendering the header, and removing the
+    // ribbon restores .view-actions with no cleanup.
+    installModeRibbonStyle() {
+        this.modeRibbonStyle = document.createElement("style");
+        this.modeRibbonStyle.textContent = `
+            .view-header:has(> .mode-ribbon) > .view-actions {
+                display: none !important;
             }
+            .view-header > .mode-ribbon {
+                flex-shrink: 0;
+            }
+        `;
+        document.head.appendChild(this.modeRibbonStyle);
+    },
 
-            view.containerEl
-                .querySelectorAll(
-                    `.${this.markdownMovieModeActionClass}, [aria-label="MovieMode"], [title="MovieMode"]`
-                )
-                .forEach(action => action.remove());
+    removeAllModeRibbons() {
+        this.app.workspace.iterateAllLeaves(leaf => {
+            const containerEl = leaf.view && leaf.view.containerEl;
+            if (containerEl) {
+                containerEl.querySelectorAll(".mode-ribbon").forEach(ribbon => ribbon.remove());
+            }
+        });
+
+        if (this.modeRibbonStyle) {
+            this.modeRibbonStyle.remove();
+            this.modeRibbonStyle = null;
         }
     },
 
-    removeMarkdownReviewActions() {
-        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-            const view = leaf.view;
-
-            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
-                continue;
-            }
-
-            view.containerEl
-                .querySelectorAll(`.${this.markdownReviewActionClass}`)
-                .forEach(action => action.remove());
-
-            view.containerEl
-                .querySelectorAll('[aria-label="Review images"], [title="Review images"], [aria-label="GPTViz Candidate View"], [title="GPTViz Candidate View"]')
-                .forEach(action => action.remove());
-        }
-    },
-
-    removeMarkdownDependencyActions() {
-        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-            const view = leaf.view;
-
-            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
-                continue;
-            }
-
-            view.containerEl
-                .querySelectorAll(
-                    `.${this.markdownDependencyActionClass}, [aria-label="GPTViz Validate Dependencies"], [title="GPTViz Validate Dependencies"]`
-                )
-                .forEach(action => action.remove());
-        }
-    },
-
-    scheduleMarkdownReviewActionStateRefresh() {
-        if (this.markdownReviewActionRefreshTimer) {
-            window.clearTimeout(this.markdownReviewActionRefreshTimer);
+    scheduleModeRibbonButtonStateRefresh() {
+        if (this.modeRibbonStateRefreshTimer) {
+            window.clearTimeout(this.modeRibbonStateRefreshTimer);
         }
 
-        this.markdownReviewActionRefreshTimer = window.setTimeout(() => {
-            this.markdownReviewActionRefreshTimer = null;
-            this.updateMarkdownReviewActionStates();
+        this.modeRibbonStateRefreshTimer = window.setTimeout(() => {
+            this.modeRibbonStateRefreshTimer = null;
+            this.updateModeRibbonButtonStates();
         }, 200);
     },
 
-    updateMarkdownReviewActionStates() {
-        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-            const view = leaf.view;
-            if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
-                continue;
+    updateModeRibbonButtonStates() {
+        this.app.workspace.iterateAllLeaves(leaf => {
+            if (this.isModeRibbonView(leaf.view)) {
+                this.applyModeRibbonButtonStatesForView(leaf.view);
             }
-            this.applyModeRibbonButtonStatesForView(view, leaf);
-        }
-
-        for (const leaf of this.app.workspace.getLeavesOfType(GPTViz.CANDIDATE_VIEW_TYPE)) {
-            const view = leaf.view;
-            if (!this.isCandidateView(view)) {
-                continue;
-            }
-            this.applyModeRibbonButtonStatesForView(view, leaf);
-        }
-
-        for (const leaf of this.app.workspace.getLeavesOfType("movi-player-view")) {
-            const view = leaf.view;
-            if (!this.isMoviPlayerView(view)) {
-                continue;
-            }
-            this.applyModeRibbonButtonStatesForView(view, leaf);
-        }
+        });
     }
+});
 });

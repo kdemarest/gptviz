@@ -1,3 +1,4 @@
+unit("settings", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
@@ -30,3 +31,4 @@ GPTViz.SettingTab = class extends GPTViz.obsidian.PluginSettingTab {
             );
     }
 };
+});

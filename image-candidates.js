@@ -1,3 +1,4 @@
+unit("image-candidates", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.getImageCandidates = function(app, activeFile, assetPath) {
@@ -145,3 +146,4 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
 
     return GPTViz.getImageCandidates(app, activeFile, normalizedAssetPath);
 };
+});

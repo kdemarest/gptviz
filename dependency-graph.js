@@ -1,3 +1,4 @@
+unit("dependency-graph", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.findStaleDependencies = async function(app) {
@@ -80,7 +81,7 @@ GPTViz.getImageTagReferences = function(text) {
         addReference(match[1]);
     }
 
-    for (const match of text.matchAll(/^[ \t]*(?:Images|Photos):[ \t]*(.*)$/gim)) {
+    for (const match of text.matchAll(/^[ \t]*Images:[ \t]*(.*)$/gim)) {
         for (const value of match[1].split(",")) {
             addReference(value);
         }
@@ -159,7 +160,7 @@ GPTViz.loadDependencyValidationConfig = async function(app) {
     try {
         raw = JSON.parse(text);
     } catch (error) {
-        throw new Error(`Invalid dependency config JSON at ${path}: ${error.message}`);
+        throw new Error(`Invalid dependency config JSON at ${path}: ${error.message}`, { cause: error });
     }
 
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -347,7 +348,7 @@ GPTViz.parseDependencyDeclaredInputs = function(operation, sectionText, defaultS
 
     if (operation === "Prompt") {
         for (const line of lines) {
-            const match = /^[ \t]*(?:Images|Photos):[ \t]*(.*)$/i.exec(line);
+            const match = /^[ \t]*Images:[ \t]*(.*)$/i.exec(line);
             if (!match) {
                 continue;
             }
@@ -397,46 +398,27 @@ GPTViz.getDependencyRecordOutputPath = function(record) {
     return GPTViz.normalizeDependencyAssetPath(record.name, ".png");
 };
 
+// Script errors are reported as GPTViz.ScriptParseError so callers can list them as content
+// issues; anything else (movi not loaded, broken contract) propagates.
+GPTViz.ScriptParseError = class extends Error {};
+
 GPTViz.getScriptDependenciesFromMoviParser = async function(app, markdownFilePath) {
-    const filePath = String(markdownFilePath || "").trim();
-    if (!filePath) {
-        return [];
-    }
-
-    return await new Promise(resolve => {
-        let settled = false;
-        const finish = value => {
-            if (settled) {
-                return;
-            }
-            settled = true;
-            resolve(Array.isArray(value) ? value : []);
-        };
-
-        const timeout = window.setTimeout(() => {
-            finish([]);
-        }, 500);
-
+    return await new Promise((resolve, reject) => {
         const event = new CustomEvent("gptviz:script-required-assets-request", {
             detail: {
-                filePath,
-                resolve: payload => {
-                    window.clearTimeout(timeout);
-                    if (payload && payload.ok && Array.isArray(payload.requiredAssets)) {
-                        finish(payload.requiredAssets);
-                        return;
-                    }
-                    finish([]);
-                },
-                reject: () => {
-                    window.clearTimeout(timeout);
-                    finish([]);
-                }
+                filePath: markdownFilePath,
+                resolve: payload => resolve(payload.requiredAssets),
+                reject: error => reject(new GPTViz.ScriptParseError(
+                    `${markdownFilePath}: ${error && error.message ? error.message : String(error)}`
+                ))
             },
-            cancelable: false
+            cancelable: true
         });
 
-        window.dispatchEvent(event);
+        // movi claims the request synchronously with preventDefault().
+        if (window.dispatchEvent(event)) {
+            reject(new Error("Script dependencies need the movi plugin, which did not answer. Is movi enabled?"));
+        }
     }).then(values => {
         const normalized = [];
         const seen = new Set();
@@ -559,10 +541,26 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
 
             if (parsed.operation === "Script") {
                 if (!scriptDependenciesByFilePath.has(markdownFile.path)) {
-                    const dependencies = await GPTViz.getScriptDependenciesFromMoviParser(
-                        app,
-                        markdownFile.path
-                    );
+                    let dependencies = [];
+                    try {
+                        dependencies = await GPTViz.getScriptDependenciesFromMoviParser(
+                            app,
+                            markdownFile.path
+                        );
+                    } catch (error) {
+                        if (!(error instanceof GPTViz.ScriptParseError)) {
+                            throw error;
+                        }
+                        pushIssue(
+                            errors,
+                            markdownFile.path,
+                            lineNumber,
+                            parsed.operation,
+                            parsed.name,
+                            `Script does not parse: ${error.message}`,
+                            "script_parse_error"
+                        );
+                    }
                     scriptDependenciesByFilePath.set(markdownFile.path, dependencies);
                 }
                 resolvedInputs = scriptDependenciesByFilePath.get(markdownFile.path) || [];
@@ -665,7 +663,7 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
         }
     }
 
-    for (const [name, markEntries] of markByName.entries()) {
+    for (const markEntries of markByName.values()) {
         const distinctSources = new Set(
             markEntries.map(entry => String(entry.source || "").toLowerCase())
         );
@@ -891,3 +889,4 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
         }
     };
 };
+});

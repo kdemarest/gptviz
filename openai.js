@@ -1,38 +1,7 @@
+unit("openai", [], () => {
 globalThis.GPTViz = globalThis.GPTViz || {};
 
 GPTViz.obsidian = GPTViz.obsidian || require("obsidian");
-
-GPTViz.testOpenAIConnection = async function(apiKey) {
-    const response = await GPTViz.obsidian.requestUrl({
-        url: "https://api.openai.com/v1/responses",
-        method: "POST",
-
-        headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-            model: "gpt-5.6-luna",
-            input: "Reply with exactly: connection successful"
-        })
-    });
-
-    const data = response.json;
-
-    for (const output of data.output || []) {
-        for (const content of output.content || []) {
-            if (
-                content.type === "output_text" &&
-                content.text
-            ) {
-                return content.text;
-            }
-        }
-    }
-
-    throw new Error("OpenAI returned no text response.");
-};
 
 
 GPTViz.generateOpenAIResponse = async function(apiKey, prompt, imageInputs) {
@@ -219,3 +188,4 @@ GPTViz.generateOpenAITextResponse = async function(apiKey, prompt, imageInputs) 
 
     return JSON.stringify(data, null, 2);
 };
+});
