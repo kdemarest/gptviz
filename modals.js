@@ -111,126 +111,38 @@ GPTViz.ImageIntegrityModal = class extends GPTViz.obsidian.Modal {
     }
 };
 
-GPTViz.MovieScriptUsageModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, sourceFile, rows, onPick) {
+// Compact, file-explorer-style pick list. rows: [{ label, value }]; tapping a row closes the
+// modal and calls onPick(value). emptyText shows when there are no rows.
+GPTViz.PickListModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, title, rows, emptyText, onPick) {
         super(app);
-        this.app = app;
-        this.sourceFile = sourceFile;
+        this.title = title;
         this.rows = rows;
+        this.emptyText = emptyText;
         this.onPick = onPick;
     }
 
     onOpen() {
         const contentEl = this.contentEl;
         contentEl.empty();
-
-        const sourceLabel = this.sourceFile && this.sourceFile.basename
-            ? this.sourceFile.basename
-            : "current note";
-        this.titleEl.textContent = `MovieMode scripts using ${sourceLabel} assets`;
+        this.titleEl.textContent = this.title;
 
         if (this.rows.length === 0) {
-            contentEl.createEl("p", {
-                text: `No # Script dependencies reference assets from ${sourceLabel}.`
-            });
+            contentEl.createEl("p", { text: this.emptyText });
             return;
         }
 
-        const list = contentEl.createEl("div");
+        const list = contentEl.createDiv({ cls: "nav-files-container" });
         list.style.maxHeight = "60vh";
         list.style.overflowY = "auto";
 
-        for (const row of this.rows) {
-            const item = list.createEl("div");
-            item.style.display = "grid";
-            item.style.gridTemplateColumns = "1fr";
-            item.style.gap = "0.25em";
-            item.style.padding = "0.6em 0";
-            item.style.borderBottom = "1px solid var(--background-modifier-border)";
-
-            const openButton = item.createEl("button", {
-                text: row.name
-            });
-            openButton.style.textAlign = "left";
-            openButton.addEventListener("click", async () => {
-                try {
-                    if (this.onPick) {
-                        await this.onPick(row);
-                    }
-                } finally {
-                    this.close();
-                }
-            });
-
-            item.createEl("div", {
-                text: row.path
-            });
-            if (Array.isArray(row.matches) && row.matches.length > 0) {
-                item.createEl("div", {
-                    text: `Depends: ${row.matches.join(", ")}`
-                });
-            }
-        }
-    }
-
-    onClose() {
-        this.contentEl.empty();
-    }
-};
-
-GPTViz.MovieAssetUsageModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, sourceFile, rows, onPick) {
-        super(app);
-        this.app = app;
-        this.sourceFile = sourceFile;
-        this.rows = rows;
-        this.onPick = onPick;
-    }
-
-    onOpen() {
-        const contentEl = this.contentEl;
-        contentEl.empty();
-
-        const sourceLabel = this.sourceFile && this.sourceFile.basename
-            ? this.sourceFile.basename
-            : "current note";
-        this.titleEl.textContent = `MovieMode assets in ${sourceLabel}`;
-
-        if (this.rows.length === 0) {
-            contentEl.createEl("p", {
-                text: `No Prompt/Extract asset headings were found in ${sourceLabel}.`
-            });
-            return;
-        }
-
-        const list = contentEl.createEl("div");
-        list.style.maxHeight = "60vh";
-        list.style.overflowY = "auto";
-
-        for (const row of this.rows) {
-            const item = list.createEl("div");
-            item.style.display = "grid";
-            item.style.gridTemplateColumns = "1fr";
-            item.style.gap = "0.25em";
-            item.style.padding = "0.6em 0";
-            item.style.borderBottom = "1px solid var(--background-modifier-border)";
-
-            const openButton = item.createEl("button", {
-                text: row.label
-            });
-            openButton.style.textAlign = "left";
-            openButton.addEventListener("click", async () => {
-                try {
-                    if (this.onPick) {
-                        await this.onPick(row);
-                    }
-                } finally {
-                    this.close();
-                }
-            });
-
-            item.createEl("div", {
-                text: row.filePath
+        for (const { label, value } of this.rows) {
+            const row = list.createDiv({ cls: "tree-item nav-file" })
+                .createDiv({ cls: "tree-item-self nav-file-title is-clickable" });
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: label });
+            row.addEventListener("click", async () => {
+                this.close();
+                await this.onPick(value);
             });
         }
     }
@@ -240,24 +152,26 @@ GPTViz.MovieAssetUsageModal = class extends GPTViz.obsidian.Modal {
     }
 };
 
-// Compact, file-explorer-style list of the notes a note's resources come from.
-GPTViz.NoteResourcesModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, sourceFile, noteFiles, unresolvedAssets, onPick) {
+// DependsMode's compact, file-explorer-style list of what subject (a name) depends on.
+// rows: [{ label, value }]; tapping a row calls onPick(value). unresolvedLabels are listed
+// muted and inert.
+GPTViz.DependsModal = class extends GPTViz.obsidian.Modal {
+    constructor(app, subject, rows, unresolvedLabels, onPick) {
         super(app);
-        this.sourceFile = sourceFile;
-        this.noteFiles = noteFiles;
-        this.unresolvedAssets = unresolvedAssets;
+        this.subject = subject;
+        this.rows = rows;
+        this.unresolvedLabels = unresolvedLabels;
         this.onPick = onPick;
     }
 
     onOpen() {
         const contentEl = this.contentEl;
         contentEl.empty();
-        this.titleEl.textContent = `Resources used by ${this.sourceFile.basename}`;
+        this.titleEl.textContent = `${this.subject} depends on`;
 
-        if (this.noteFiles.length === 0 && this.unresolvedAssets.length === 0) {
+        if (this.rows.length === 0 && this.unresolvedLabels.length === 0) {
             contentEl.createEl("p", {
-                text: `${this.sourceFile.basename} uses no resources.`
+                text: `${this.subject} depends on nothing.`
             });
             return;
         }
@@ -266,21 +180,21 @@ GPTViz.NoteResourcesModal = class extends GPTViz.obsidian.Modal {
         list.style.maxHeight = "60vh";
         list.style.overflowY = "auto";
 
-        for (const noteFile of this.noteFiles) {
+        for (const { label, value } of this.rows) {
             const row = list.createDiv({ cls: "tree-item nav-file" })
                 .createDiv({ cls: "tree-item-self nav-file-title is-clickable" });
-            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: noteFile.basename });
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: label });
             row.addEventListener("click", async () => {
                 this.close();
-                await this.onPick(noteFile);
+                await this.onPick(value);
             });
         }
 
-        for (const asset of this.unresolvedAssets) {
+        for (const label of this.unresolvedLabels) {
             const row = list.createDiv({ cls: "tree-item nav-file" })
                 .createDiv({ cls: "tree-item-self nav-file-title" });
             row.style.color = "var(--text-faint)";
-            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: `${asset} (no note)` });
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: `${label} (no note)` });
         }
     }
 

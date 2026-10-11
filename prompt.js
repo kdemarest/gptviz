@@ -111,43 +111,25 @@ GPTViz.getPromptSectionFromLines = function(lines, startLine) {
     return GPTViz.getHeadingSectionFromLines(lines, startLine);
 };
 
-GPTViz.getPromptSection = function(editor) {
-    const lineCount = editor.lineCount();
-    const cursorLine = editor.getCursor().line;
-    const lines = [];
+// The Prompt section that produces assetPath: the Prompt named for it, or, for the note's
+// own image (<note>.png), its unnamed Prompt (else its first Prompt). Null if none does.
+GPTViz.findPromptSectionForAsset = function(text, assetPath, noteBasename) {
+    const sections = GPTViz.getPromptSectionsFromText(text.replace(/\r\n/g, "\n"));
+    const nameOf = section => {
+        const parsed = GPTViz.parseDependencyOperationHeading(section.text.split("\n")[0]);
+        return parsed ? GPTViz.normalizeDependencyAssetPath(parsed.name, ".png").toLowerCase() : "";
+    };
+    const target = assetPath.toLowerCase();
 
-    for (let line = 0; line < lineCount; line++) {
-        lines.push(editor.getLine(line));
+    const named = sections.find(section => nameOf(section) === target);
+    if (named) {
+        return named;
     }
-
-    let startLine = -1;
-
-    // Find nearest Prompt heading at or above cursor.
-    for (let line = cursorLine; line >= 0; line--) {
-        if (GPTViz.isPromptHeading(lines[line])) {
-            startLine = line;
-            break;
-        }
-    }
-
-    // If none above cursor, use first Prompt heading in file.
-    if (startLine === -1) {
-        for (let line = 0; line < lineCount; line++) {
-            if (GPTViz.isPromptHeading(lines[line])) {
-                startLine = line;
-                break;
-            }
-        }
-    }
-
-    if (startLine === -1) {
+    if (target !== `${noteBasename}.png`.toLowerCase()) {
         return null;
     }
-
-    return GPTViz.getPromptSectionFromLines(lines, startLine);
+    return sections.find(section => !nameOf(section)) || sections[0] || null;
 };
-
-
 GPTViz.getPromptParts = function(section) {
     const textLines = [];
     const imageNames = [];

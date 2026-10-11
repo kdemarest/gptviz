@@ -11,7 +11,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.candidates = [];
         this.index = 0;
         this.imageUrl = null;
-        this.refreshQueue = Promise.resolve();
+        // What this view shows: { file, asset, candidate, kept }, set only through setState.
+        this.target = {};
+        this.renderId = 0;
+        this.activeFile = null;
+        this.assetPath = "";
         this.markPoints = [];
         this.hasMarkBlocks = false;
         this.hasExtractBlocks = false;
@@ -19,6 +23,28 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
     getViewType() {
         return GPTViz.CANDIDATE_VIEW_TYPE;
+    }
+
+    // The view's state is its whole input: Obsidian saves and restores it with the layout,
+    // and openCandidateView sets it. Nothing else decides what the view shows.
+    getState() {
+        return {
+            file: this.target.file || null,
+            asset: this.target.asset || null,
+            candidate: this.target.candidate || null
+        };
+    }
+
+    async setState(state, result) {
+        this.target = {
+            file: state?.file || null,
+            asset: state?.asset || null,
+            candidate: state?.candidate || null,
+            kept: Boolean(state?.kept)
+        };
+        this.plugin.traceCandidate(`setState ${JSON.stringify(this.target)}`); // TEMP
+        await super.setState(state, result);
+        await this.render();
     }
 
     getDisplayText() {
@@ -179,121 +205,49 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.plugin.syncModeRibbonForView(this);
     }
 
+    // MarkdownMode: show the note. If the cursor is already inside the Prompt for this asset,
+    // leave cursor and scroll alone; otherwise scroll that Prompt's heading to the top and put
+    // the cursor on its first line of prompt text (skipping blank and "Images:" lines).
     async returnToNote() {
-        const activeFile = this.activeFile || this.plugin.getCurrentMarkdownFile();
-
-        if (!activeFile) {
-            throw new Error("No active Markdown file to return to.");
+        const file = this.activeFile;
+        if (!file) {
+            throw new Error("The Candidate View is not showing a note.");
         }
 
-        const preferredSection = this.plugin.getSelectedCandidateAssetSection(activeFile.path);
+        const leaf = await this.plugin.openNote(file);
+        const view = leaf.view;
+        if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
+            throw new Error(`${file.path} opened in a ${view.getViewType()} view, not a Markdown view.`);
+        }
 
-        const waitForViewReady = async () => {
-            await new Promise(resolve => window.setTimeout(resolve, 100));
-        };
-
-        const scrollEditorToCursor = async leaf => {
-            const editor = leaf && leaf.view ? leaf.view.editor : null;
-            if (!editor) {
-                return;
-            }
-
-            const cursor = editor.getCursor();
-            const currentLine = Number(cursor.line);
-            const hasValidCursor = Number.isFinite(currentLine);
-            const currentCh = Number(cursor.ch);
-            const sectionStart = preferredSection ? Number(preferredSection.startLine) : NaN;
-            const sectionEnd = preferredSection ? Number(preferredSection.endLine) : NaN;
-            const hasSection = Number.isFinite(sectionStart);
-
-            let targetCursor = null;
-
-            if (hasSection) {
-                const inSection = hasValidCursor &&
-                    currentLine >= sectionStart &&
-                    (!Number.isFinite(sectionEnd) || currentLine < sectionEnd);
-
-                if (!inSection) {
-                    targetCursor = {
-                        line: Math.max(0, sectionStart),
-                        ch: 0
-                    };
-                }
-            }
-
-            if (!targetCursor && hasValidCursor) {
-                targetCursor = {
-                    line: currentLine,
-                    ch: Number.isFinite(currentCh) ? currentCh : 0
-                };
-            }
-
-            if (!targetCursor) {
-                return;
-            }
-
-            try {
-                editor.setCursor(targetCursor);
-            } catch (error) {
-                const detail = error instanceof Error
-                    ? (error.stack || error.message)
-                    : String(error);
-                throw new Error(
-                    "MarkdownMode cursor positioning failed: editor.setCursor threw for " +
-                    `${activeFile.path} at line ${targetCursor.line}, ch ${targetCursor.ch}. ` +
-                    `Reason: ${detail}`,
-                    { cause: error }
-                );
-            }
-
-            await new Promise(resolve => window.setTimeout(resolve, 50));
-
-            const containerEl = leaf && leaf.view ? leaf.view.containerEl : null;
-            const scrollerEl = containerEl
-                ? containerEl.querySelector(".cm-scroller")
-                : null;
-            const activeLineEl = containerEl
-                ? containerEl.querySelector(".cm-active .cm-line, .cm-line.cm-active, .cm-activeLine .cm-line, .cm-activeLine")
-                : null;
-
-            if (!scrollerEl || !activeLineEl) {
-                return;
-            }
-
-            const scrollerRect = scrollerEl.getBoundingClientRect();
-            const lineRect = activeLineEl.getBoundingClientRect();
-            const computedLineHeight = Number.parseFloat(
-                window.getComputedStyle(activeLineEl).lineHeight
-            );
-            const measuredLineHeight = lineRect.height;
-            const lineHeight = Number.isFinite(computedLineHeight) && computedLineHeight > 0
-                ? computedLineHeight
-                : (Number.isFinite(measuredLineHeight) && measuredLineHeight > 0 ? measuredLineHeight : 20);
-            const topPaddingLines = 4;
-            const targetTop = scrollerRect.top + lineHeight * topPaddingLines;
-            const delta = lineRect.top - targetTop;
-
-            if (Number.isFinite(delta) && Math.abs(delta) > 1) {
-                const nextScrollTop = Math.max(0, scrollerEl.scrollTop + delta);
-                scrollerEl.scrollTop = nextScrollTop;
-            }
-        };
-
-        const markdownLeaf = this.app.workspace
-            .getLeavesOfType("markdown")
-            .find(leaf => leaf.view.file?.path === activeFile.path);
-
-        if (markdownLeaf) {
-            await this.app.workspace.revealLeaf(markdownLeaf);
-            await waitForViewReady();
-            await scrollEditorToCursor(markdownLeaf);
+        const editor = view.editor;
+        const assetPath = this.plugin.getWorkingAssetPath(file, this);
+        const section = GPTViz.findPromptSectionForAsset(editor.getValue(), assetPath, file.basename);
+        if (!section) {
             return;
         }
 
-        const newLeaf = this.app.workspace.getLeaf(true);
-        await newLeaf.openFile(activeFile);
-        await waitForViewReady();
-        await scrollEditorToCursor(newLeaf);
+        const cursorLine = editor.getCursor().line;
+        if (cursorLine >= section.startLine && cursorLine < section.endLine) {
+            return;
+        }
+
+        let line = section.startLine + 1;
+        while (line < section.endLine - 1 && /^[ \t]*(Images:.*)?$/i.test(editor.getLine(line))) {
+            line++;
+        }
+        editor.setCursor({ line: Math.min(line, section.endLine - 1, editor.lastLine()), ch: 0 });
+
+        if (view.getMode() === "preview") {
+            view.setEphemeralState({ line: section.startLine });
+            return;
+        }
+
+        const { EditorView } = require("@codemirror/view");
+        const cm = editor.cm;
+        cm.dispatch({
+            effects: EditorView.scrollIntoView(cm.state.doc.line(section.startLine + 1).from, { y: "start" })
+        });
     }
 
     async togglePolishInput() {
@@ -399,15 +353,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         return button;
     }
 
-    refresh(preferredPath) {
-        this.refreshQueue = this.refreshQueue.then(
-            () => this.refreshNow(preferredPath),
-            () => this.refreshNow(preferredPath)
-        );
-        return this.refreshQueue;
-    }
-
-    async refreshNow(preferredPath) {
+    // Draws this.target. A newer render supersedes this one: after each await, a superseded
+    // render stops before touching the DOM.
+    async render() {
+        const renderId = ++this.renderId;
+        const isStale = () => renderId !== this.renderId;
 
         const contentEl = this.contentEl;
         this.polishOverlay = null;
@@ -425,8 +375,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             this.imageUrl = null;
         }
 
-        const activeFile = this.plugin.getCurrentMarkdownFile();
+        const stateFile = this.target.file ? this.app.vault.getAbstractFileByPath(this.target.file) : null;
+        const activeFile = stateFile && stateFile.extension === "md" ? stateFile : null;
         this.activeFile = activeFile;
+        this.candidates = [];
+        this.plugin.traceCandidate(`render ${activeFile?.path} asset=${this.target.asset} candidate=${this.target.candidate}`); // TEMP
         this.markPoints = [];
         this.hasMarkBlocks = false;
         this.hasExtractBlocks = false;
@@ -435,22 +388,36 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         if (!activeFile) {
             this.createGenerateButton(contentEl);
             contentEl.createEl("p", {
-                text: "Open a Markdown file to view candidates."
+                text: this.target.file
+                    ? `Note not found: ${this.target.file}`
+                    : "Open the Candidate View from a note to view candidates."
             });
             return;
         }
 
-        this.hasMarkBlocks = await this.plugin.hasMarkBlocksForFile(activeFile);
-        this.hasExtractBlocks = await this.plugin.hasExtractBlocksForFile(activeFile);
+        this.assetPath = this.target.asset
+            ? GPTViz.normalizeDependencyAssetPath(this.target.asset, ".png")
+            : this.plugin.getActiveCandidateAssetPath(activeFile);
 
-        this.assetPath = this.plugin.getActiveCandidateAssetPath(activeFile);
+        const hasMarkBlocks = await this.plugin.hasMarkBlocksForFile(activeFile);
+        const hasExtractBlocks = await this.plugin.hasExtractBlocksForFile(activeFile);
+        if (isStale()) {
+            return;
+        }
+        this.hasMarkBlocks = hasMarkBlocks;
+        this.hasExtractBlocks = hasExtractBlocks;
+
+        let candidates;
         try {
-            this.candidates = await GPTViz.ensureKeptImageCandidate(
+            candidates = await GPTViz.ensureKeptImageCandidate(
                 this.app,
                 activeFile,
                 this.assetPath
             );
         } catch (error) {
+            if (isStale()) {
+                return;
+            }
             this.plugin.reportError("loading candidate images", error);
             contentEl.createEl("p", {
                 text: "GPTViz: could not load candidate images. See the error dialog for details."
@@ -458,6 +425,11 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             return;
         }
 
+
+        if (isStale()) {
+            return;
+        }
+        this.candidates = candidates;
 
         if (this.candidates.length === 0) {
             const noCandidatesAssetPath = this.assetPath || `${activeFile.basename}.png`;
@@ -474,8 +446,16 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             this.plugin.getLastCandidatePath(activeFile.path);
 
         this.index = this.candidates.length - 1;
-        const selectedPath = preferredPath || rememberedPath;
-        if (selectedPath) {
+        const keptIndex = this.target.kept && !this.target.candidate
+            ? await this.findKeptCandidateIndex()
+            : -1;
+        if (isStale()) {
+            return;
+        }
+        const selectedPath = this.target.candidate || rememberedPath;
+        if (keptIndex !== -1) {
+            this.index = keptIndex;
+        } else if (selectedPath) {
             const preferredIndex = this.candidates.findIndex(
                 candidate => candidate.file.path === selectedPath
             );
@@ -790,8 +770,14 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
     }
 
     async renderCurrentImage() {
+        const renderId = this.renderId;
         const candidate = this.candidates[this.index];
         const binary = await this.app.vault.readBinary(candidate.file);
+        if (renderId !== this.renderId) {
+            return;
+        }
+        this.target.candidate = candidate.file.path;
+        this.target.kept = false;
 
         if (this.imageUrl) {
             URL.revokeObjectURL(this.imageUrl);
@@ -955,9 +941,8 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         let binary = await this.app.vault.readBinary(candidate.file);
         const candidateTimestamps = GPTViz.fileTimestampOptions(candidate.file);
         let savedPrompt = GPTViz.extractPromptFromPng(binary);
-        const currentPrompt = await this.plugin.getCurrentPromptForFile(
-            this.activeFile
-        );
+        const assetPath = this.plugin.getWorkingAssetPath(this.activeFile, this);
+        const currentPrompt = await this.plugin.getCurrentPromptForFile(this.activeFile, assetPath);
 
         if (
             currentPrompt !== null &&
@@ -986,10 +971,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
 
             if (choice === "Yes") {
-                await this.plugin.alignMarkdownPrompt(
-                    this.activeFile,
-                    savedPrompt
-                );
+                await this.plugin.alignMarkdownPrompt(this.activeFile, assetPath, savedPrompt);
             }
         }
 

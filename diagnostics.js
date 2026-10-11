@@ -11,6 +11,12 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
     },
 
+    // TEMP: tracing why the Candidate View jumps to another note; remove once found.
+    traceCandidate(what) {
+        const stack = String(new Error().stack || "").split("\n").slice(2, 9).join("\n");
+        this.appendLog(`TRACE ${new Date().toISOString()} ${what}\n${stack}\n`).catch(() => {});
+    },
+
     async appendRunLog() {
         await this.appendLog(`\n${new Date().toISOString()}\n\n`);
     },

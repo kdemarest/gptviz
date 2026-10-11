@@ -434,6 +434,162 @@ GPTViz.getScriptDependenciesFromMoviParser = async function(app, markdownFilePat
     });
 };
 
+GPTViz.pushDependencyIssue = function(collection, filePath, line, operation, name, message, code) {
+    collection.push({
+        key: `${filePath}#${operation}:${name}`,
+        filePath,
+        line,
+        operation,
+        name,
+        code,
+        message
+    });
+};
+
+// Each note's operation records and per-note errors, cached until the note changes (by
+// modification time), so only edited notes are rescanned; editing a script rescans just it.
+// Records are never modified after the scan, so builds can share them.
+GPTViz.dependencyFileScans = new Map();
+
+GPTViz.getDependencyFileScan = async function(app, markdownFile) {
+    const cached = GPTViz.dependencyFileScans.get(markdownFile.path);
+    if (cached && cached.mtime === markdownFile.stat.mtime) {
+        return cached;
+    }
+
+    const scan = { mtime: markdownFile.stat.mtime, ...(await GPTViz.scanDependencyFile(app, markdownFile)) };
+    GPTViz.dependencyFileScans.set(markdownFile.path, scan);
+    return scan;
+};
+
+GPTViz.scanDependencyFile = async function(app, markdownFile) {
+    const errors = [];
+    const records = [];
+    const scriptDependenciesByFilePath = new Map();
+
+    const pushIssue = GPTViz.pushDependencyIssue;
+
+    const text = await app.vault.cachedRead(markdownFile);
+    const lines = String(text || "").split("\n");
+    const seenInFile = new Set();
+
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const heading = GPTViz.parseHeading(lines[lineIndex]);
+        if (!heading) {
+            continue;
+        }
+
+        const operationLike = /^(Prompt|Extract|Mark|Script)\b/.exec(heading.text.trim());
+        if (!operationLike) {
+            continue;
+        }
+
+        const parsed = GPTViz.parseDependencyOperationHeading(lines[lineIndex]);
+        const lineNumber = lineIndex + 1;
+
+        if (!parsed) {
+            const opName = operationLike[1];
+            const fallbackName = heading.text.trim().replace(/^\S+[ \t]*/, "") || "invalid";
+            pushIssue(
+                errors,
+                markdownFile.path,
+                lineNumber,
+                opName,
+                fallbackName,
+                `Unsupported ${opName} heading form. Use '## <Operation>: <AssetFileName>' or '## <Operation> <AssetFileName>'.`,
+                "invalid_heading_form"
+            );
+            continue;
+        }
+
+        const identity = `${parsed.operation}:${parsed.canonicalName || parsed.name}`;
+        const fileIdentityKey = `${markdownFile.path}#${identity}`.toLowerCase();
+        if (seenInFile.has(fileIdentityKey)) {
+            pushIssue(
+                errors,
+                markdownFile.path,
+                lineNumber,
+                parsed.operation,
+                parsed.name,
+                `Duplicate block identity '${identity}' in the same file.`,
+                "duplicate_block_identity"
+            );
+            continue;
+        }
+        seenInFile.add(fileIdentityKey);
+
+        if (!/^[A-Za-z0-9_ -]+(?:\.[A-Za-z0-9_ -]+)*$/.test(parsed.name)) {
+            pushIssue(
+                errors,
+                markdownFile.path,
+                lineNumber,
+                parsed.operation,
+                parsed.name,
+                `Illegal target name '${parsed.name}'. Use only letters, numbers, spaces, underscores, hyphens, and dots.`,
+                "illegal_target_name"
+            );
+            continue;
+        }
+
+        const section = GPTViz.getHeadingSectionFromLines(lines, lineIndex);
+        const defaultSource = `${markdownFile.basename}.png`;
+        let resolvedInputs = GPTViz.parseDependencyDeclaredInputs(
+            parsed.operation,
+            section.text,
+            defaultSource
+        );
+
+        if (parsed.operation === "Script") {
+            if (!scriptDependenciesByFilePath.has(markdownFile.path)) {
+                let dependencies = [];
+                try {
+                    dependencies = await GPTViz.getScriptDependenciesFromMoviParser(
+                        app,
+                        markdownFile.path
+                    );
+                } catch (error) {
+                    if (!(error instanceof GPTViz.ScriptParseError)) {
+                        throw error;
+                    }
+                    pushIssue(
+                        errors,
+                        markdownFile.path,
+                        lineNumber,
+                        parsed.operation,
+                        parsed.name,
+                        `Script does not parse: ${error.message}`,
+                        "script_parse_error"
+                    );
+                }
+                scriptDependenciesByFilePath.set(markdownFile.path, dependencies);
+            }
+            resolvedInputs = scriptDependenciesByFilePath.get(markdownFile.path) || [];
+        }
+
+        const source = parsed.operation === "Mark"
+            ? (resolvedInputs[0] || "")
+            : "";
+
+        const record = {
+            id: `${markdownFile.path}#${identity}`,
+            filePath: markdownFile.path,
+            fileName: markdownFile.name,
+            line: lineNumber,
+            operation: parsed.operation,
+            name: parsed.name,
+            canonicalName: parsed.canonicalName || parsed.name,
+            source,
+            resolvedInputs,
+            outputPath: ""
+        };
+
+        record.outputPath = GPTViz.getDependencyRecordOutputPath(record);
+        records.push(record);
+    }
+
+    return { records, errors };
+};
+
 GPTViz.buildDependencyHeadingReport = async function(app) {
     const allMarkdownFiles = app.vault.getMarkdownFiles();
     const dependencyConfig = await GPTViz.loadDependencyValidationConfig(app);
@@ -447,19 +603,8 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
     const extractByName = new Map();
     const markByName = new Map();
     const markBySourceAndName = new Map();
-    const scriptDependenciesByFilePath = new Map();
 
-    const pushIssue = (collection, filePath, line, operation, name, message, code) => {
-        collection.push({
-            key: `${filePath}#${operation}:${name}`,
-            filePath,
-            line,
-            operation,
-            name,
-            code,
-            message
-        });
-    };
+    const pushIssue = GPTViz.pushDependencyIssue;
 
     const ensureBucket = (map, key) => {
         if (!map.has(key)) {
@@ -469,134 +614,22 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
     };
 
     for (const markdownFile of markdownFiles) {
-        const text = await app.vault.cachedRead(markdownFile);
-        const lines = String(text || "").split("\n");
-        const seenInFile = new Set();
+        const scan = await GPTViz.getDependencyFileScan(app, markdownFile);
+        errors.push(...scan.errors);
+        records.push(...scan.records);
+    }
 
-        for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-            const heading = GPTViz.parseHeading(lines[lineIndex]);
-            if (!heading) {
-                continue;
-            }
-
-            const operationLike = /^(Prompt|Extract|Mark|Script)\b/.exec(heading.text.trim());
-            if (!operationLike) {
-                continue;
-            }
-
-            const parsed = GPTViz.parseDependencyOperationHeading(lines[lineIndex]);
-            const lineNumber = lineIndex + 1;
-
-            if (!parsed) {
-                const opName = operationLike[1];
-                const fallbackName = heading.text.trim().replace(/^\S+[ \t]*/, "") || "invalid";
-                pushIssue(
-                    errors,
-                    markdownFile.path,
-                    lineNumber,
-                    opName,
-                    fallbackName,
-                    `Unsupported ${opName} heading form. Use '## <Operation>: <AssetFileName>' or '## <Operation> <AssetFileName>'.`,
-                    "invalid_heading_form"
-                );
-                continue;
-            }
-
-            const identity = `${parsed.operation}:${parsed.canonicalName || parsed.name}`;
-            const fileIdentityKey = `${markdownFile.path}#${identity}`.toLowerCase();
-            if (seenInFile.has(fileIdentityKey)) {
-                pushIssue(
-                    errors,
-                    markdownFile.path,
-                    lineNumber,
-                    parsed.operation,
-                    parsed.name,
-                    `Duplicate block identity '${identity}' in the same file.`,
-                    "duplicate_block_identity"
-                );
-                continue;
-            }
-            seenInFile.add(fileIdentityKey);
-
-            if (!/^[A-Za-z0-9_ -]+(?:\.[A-Za-z0-9_ -]+)*$/.test(parsed.name)) {
-                pushIssue(
-                    errors,
-                    markdownFile.path,
-                    lineNumber,
-                    parsed.operation,
-                    parsed.name,
-                    `Illegal target name '${parsed.name}'. Use only letters, numbers, spaces, underscores, hyphens, and dots.`,
-                    "illegal_target_name"
-                );
-                continue;
-            }
-
-            const section = GPTViz.getHeadingSectionFromLines(lines, lineIndex);
-            const defaultSource = `${markdownFile.basename}.png`;
-            let resolvedInputs = GPTViz.parseDependencyDeclaredInputs(
-                parsed.operation,
-                section.text,
-                defaultSource
-            );
-
-            if (parsed.operation === "Script") {
-                if (!scriptDependenciesByFilePath.has(markdownFile.path)) {
-                    let dependencies = [];
-                    try {
-                        dependencies = await GPTViz.getScriptDependenciesFromMoviParser(
-                            app,
-                            markdownFile.path
-                        );
-                    } catch (error) {
-                        if (!(error instanceof GPTViz.ScriptParseError)) {
-                            throw error;
-                        }
-                        pushIssue(
-                            errors,
-                            markdownFile.path,
-                            lineNumber,
-                            parsed.operation,
-                            parsed.name,
-                            `Script does not parse: ${error.message}`,
-                            "script_parse_error"
-                        );
-                    }
-                    scriptDependenciesByFilePath.set(markdownFile.path, dependencies);
-                }
-                resolvedInputs = scriptDependenciesByFilePath.get(markdownFile.path) || [];
-            }
-
-            const source = parsed.operation === "Mark"
-                ? (resolvedInputs[0] || "")
-                : "";
-
-            const record = {
-                id: `${markdownFile.path}#${identity}`,
-                filePath: markdownFile.path,
-                fileName: markdownFile.name,
-                line: lineNumber,
-                operation: parsed.operation,
-                name: parsed.name,
-                canonicalName: parsed.canonicalName || parsed.name,
-                source,
-                resolvedInputs,
-                outputPath: ""
-            };
-
-            record.outputPath = GPTViz.getDependencyRecordOutputPath(record);
-            records.push(record);
-
-            const normalizedName = record.canonicalName.toLowerCase();
-            if (parsed.operation === "Prompt") {
-                ensureBucket(promptByName, normalizedName).push(record);
-            } else if (parsed.operation === "Extract") {
-                ensureBucket(extractByName, normalizedName).push(record);
-            } else if (parsed.operation === "Mark") {
-                ensureBucket(markByName, normalizedName).push(record);
-                const normalizedSource = String(source || "").toLowerCase();
-                const sourceKey = `${normalizedSource}::${normalizedName}`;
-                ensureBucket(markBySourceAndName, sourceKey).push(record);
-            }
+    for (const record of records) {
+        const normalizedName = record.canonicalName.toLowerCase();
+        if (record.operation === "Prompt") {
+            ensureBucket(promptByName, normalizedName).push(record);
+        } else if (record.operation === "Extract") {
+            ensureBucket(extractByName, normalizedName).push(record);
+        } else if (record.operation === "Mark") {
+            ensureBucket(markByName, normalizedName).push(record);
+            const normalizedSource = String(record.source || "").toLowerCase();
+            const sourceKey = `${normalizedSource}::${normalizedName}`;
+            ensureBucket(markBySourceAndName, sourceKey).push(record);
         }
     }
 

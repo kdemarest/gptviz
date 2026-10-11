@@ -34,8 +34,10 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
     },
 
+    // The explicit vault-wide check, so it rescans every note instead of trusting the cache.
     async validateDependencyHeadings() {
         try {
+            GPTViz.dependencyFileScans.clear();
             const report = await GPTViz.buildDependencyHeadingReport(this.app);
             const reportPath = GPTViz.contentPath("_deps.md");
             let reportFile = this.app.vault.getAbstractFileByPath(reportPath);
@@ -45,14 +47,7 @@ Object.assign(GPTViz.Plugin.prototype, {
                 reportFile = await this.app.vault.create(reportPath, report.markdown);
             }
 
-            const markdownLeaves = this.app.workspace.getLeavesOfType("markdown");
-            const existingLeaf = markdownLeaves.find(leaf => leaf.view.file?.path === reportFile.path);
-
-            if (existingLeaf) {
-                await this.app.workspace.revealLeaf(existingLeaf);
-            } else {
-                await (markdownLeaves[0] || this.app.workspace.getLeaf(false)).openFile(reportFile);
-            }
+            await this.openNote(reportFile);
 
             const summary = `GPTViz: dependency validation wrote ${reportPath} (${report.errors.length} error${report.errors.length === 1 ? "" : "s"}, ${report.warnings.length} warning${report.warnings.length === 1 ? "" : "s"}).`;
             new GPTViz.obsidian.Notice(summary);

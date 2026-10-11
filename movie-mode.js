@@ -1,9 +1,11 @@
 unit("movie-mode", ["plugin"], () => {
 Object.assign(GPTViz.Plugin.prototype, {
     async requestMovieMode(detail) {
+        this.recordBackPlace();
         const payload = {
             source: detail && detail.source ? detail.source : "gptviz",
             filePath: detail && detail.filePath ? detail.filePath : null,
+            scriptLine: detail && Number.isInteger(detail.scriptLine) ? detail.scriptLine : null,
             requestedAt: new Date().toISOString()
         };
 
@@ -24,14 +26,16 @@ Object.assign(GPTViz.Plugin.prototype, {
     },
 
     isMoviPlayerView(view) {
-        return Boolean(view) && view.getViewType() === "movi-player-view";
+        // movi's class isn't visible here, so also require a loaded tab: an unloaded one holds a
+        // placeholder view that reports this type without being the player.
+        return Boolean(view) && view.getViewType() === "movi-player-view" && !view.leaf.isDeferred;
     },
 
     getMovieSourceMarkdownPath(view) {
         if (view && view.movie && typeof view.movie.sourcePath === "string" && view.movie.sourcePath) {
             return view.movie.sourcePath;
         }
-        return this.lastMarkdownFilePath || "";
+        return "";
     },
 
     resolveMovieSourceMarkdownFile(view) {
@@ -54,42 +58,7 @@ Object.assign(GPTViz.Plugin.prototype, {
             throw new Error("No movie source Markdown file is available.");
         }
 
-        const markdownLeaf = this.app.workspace
-            .getLeavesOfType("markdown")
-            .find(leaf => leaf.view && leaf.view.file && leaf.view.file.path === sourceFile.path);
-
-        if (markdownLeaf) {
-            await this.app.workspace.revealLeaf(markdownLeaf);
-            return;
-        }
-
-        await this.app.workspace.getLeaf(true).openFile(sourceFile);
-    },
-
-    async openCandidateViewForMovieSource(view) {
-        const sourceFile = this.resolveMovieSourceMarkdownFile(view);
-        if (!sourceFile) {
-            throw new Error("No movie source Markdown file is available.");
-        }
-
-        this.rememberMarkdownFile(sourceFile);
-        await this.openCandidateView();
-    },
-
-    markdownFileHasScriptHeading(file) {
-        if (!file || file.extension !== "md") {
-            return false;
-        }
-
-        const cache = this.app.metadataCache.getFileCache(file);
-        const headings = Array.isArray(cache?.headings)
-            ? cache.headings
-            : [];
-
-        return headings.some(heading =>
-            typeof heading?.heading === "string" &&
-            heading.heading.trim().toLowerCase().startsWith("script")
-        );
+        await this.openNote(sourceFile);
     },
 
     markdownFileHasPromptHeading(file) {
@@ -206,252 +175,60 @@ Object.assign(GPTViz.Plugin.prototype, {
         return ordered;
     },
 
-    getCandidateAssetPathForMovieMode(view) {
-        if (!this.isCandidateView(view)) {
-            return "";
-        }
-
-        const index = Number(view.index);
-        const candidates = view.candidates;
-        const candidate = Number.isFinite(index) && index >= 0 && index < candidates.length
-            ? candidates[index]
-            : null;
-        const name = candidate && candidate.file ? String(candidate.file.name || "") : "";
-        const match = /^(.+)-\d+\.png$/i.exec(name);
-
-        if (match && match[1]) {
-            return `${match[1]}.png`;
-        }
-
-        return "";
+    // The Script headings in a note, as { label, line } with a 0-based line, matched the way
+    // movi's parser finds them.
+    async getScriptHeadingsForMarkdownFile(file) {
+        const text = await this.app.vault.cachedRead(file);
+        const headings = [];
+        String(text || "").split("\n").forEach((line, index) => {
+            const heading = GPTViz.parseHeading(line);
+            if (heading && /^Script\b/i.test(heading.text.trim())) {
+                headings.push({ label: heading.text.trim(), line: index });
+            }
+        });
+        return headings;
     },
 
-    // Lists the resources a note uses: its # Script assets (from the shared dependency
-    // graph) and the Images: entries of every Prompt section (read the same way image
-    // generation reads them). Picking one opens the note that produces it in the given leaf.
-    async showNoteResources(noteFile, leaf) {
+    // The image assets a note specifies: its Prompt and Extract outputs, plus the image each
+    // of its Marks sits on (scripts reference marks only through that image).
+    async getNoteSpecifiedAssets(file) {
         const report = await GPTViz.buildDependencyHeadingReport(this.app);
-        const records = report.graph.records;
-
-        const producerByOutput = new Map();
-        for (const record of records) {
-            if (record.outputPath) {
-                producerByOutput.set(record.outputPath.toLowerCase(), record);
-            }
-        }
-
         const assets = new Set();
-        for (const record of records) {
-            if (record.operation === "Script" && record.filePath === noteFile.path) {
-                record.resolvedInputs.forEach(value => assets.add(String(value).toLowerCase()));
+        for (const record of report.graph.records) {
+            if (record.filePath !== file.path) {
+                continue;
+            }
+            const asset = record.operation === "Mark" ? record.source : record.outputPath;
+            if (asset) {
+                assets.add(asset.toLowerCase());
             }
         }
+        return { assets, records: report.graph.records };
+    },
 
-        const noteText = await this.app.vault.cachedRead(noteFile);
-        for (const section of GPTViz.getPromptSectionsFromText(noteText)) {
-            for (const imageName of GPTViz.getPromptParts(section).imageNames) {
-                assets.add(GPTViz.normalizeDependencyAssetPath(imageName, ".png").toLowerCase());
-            }
-        }
-
+    // The Script notes that show at least one of the note's assets, sorted by name.
+    async findScriptNotesUsingNote(file) {
+        const { assets, records } = await this.getNoteSpecifiedAssets(file);
         const notesByPath = new Map();
-        const unresolvedAssets = [];
-
-        for (const asset of [...assets].sort()) {
-            const producer = producerByOutput.get(asset);
-            let notePath = producer ? producer.filePath : "";
-
-            if (!notePath) {
-                const baseName = asset.split("/").pop().replace(/\.[^.]+$/, "");
-                const sameNamePath = GPTViz.contentPath(`${baseName}.md`).toLowerCase();
-                const sameNameNote = this.app.vault.getMarkdownFiles()
-                    .find(file => file.path.toLowerCase() === sameNamePath);
-                notePath = sameNameNote ? sameNameNote.path : "";
-            }
-
-            if (notePath === noteFile.path) {
-                continue;
-            }
-
-            const resourceFile = notePath ? this.app.vault.getAbstractFileByPath(notePath) : null;
-            if (resourceFile && resourceFile.extension === "md") {
-                notesByPath.set(resourceFile.path, resourceFile);
-            } else {
-                unresolvedAssets.push(asset);
-            }
-        }
-
-        const noteFiles = [...notesByPath.values()]
-            .sort((left, right) => left.basename.localeCompare(right.basename));
-
-        new GPTViz.NoteResourcesModal(this.app, noteFile, noteFiles, unresolvedAssets, async resourceFile => {
-            try {
-                await leaf.openFile(resourceFile);
-            } catch (error) {
-                this.reportError("opening a script resource note", error);
-            }
-        }).open();
-    },
-
-    async showMovieScriptUsageForAssets(sourceFile, assetPaths, leaf) {
-        const normalizedAssets = [...new Set(
-            assetPaths
-                .map(value => GPTViz.normalizeDependencyAssetPath(value, ""))
-                .filter(Boolean)
-        )];
-
-        const rows = await this.findMovieScriptsUsingAssets(
-            normalizedAssets,
-            sourceFile && sourceFile.path ? sourceFile.path : "",
-            { recursive: true }
-        );
-
-        const openScript = async row => {
-            const scriptFile = this.app.vault.getAbstractFileByPath(row.path);
-            if (!scriptFile || scriptFile.extension !== "md") {
-                new GPTViz.obsidian.Notice(`GPTViz: script note not found: ${row.path}`);
-                return;
-            }
-
-            const existingScriptLeaf = this.app.workspace
-                .getLeavesOfType("markdown")
-                .find(candidateLeaf =>
-                    candidateLeaf.view &&
-                    candidateLeaf.view.file &&
-                    candidateLeaf.view.file.path === scriptFile.path
-                );
-
-            if (existingScriptLeaf) {
-                await this.app.workspace.revealLeaf(existingScriptLeaf);
-                return;
-            }
-
-            await this.app.workspace.getLeaf(true).openFile(scriptFile);
-        };
-
-        if (rows.length === 1) {
-            await openScript(rows[0]);
-            return;
-        }
-
-        new GPTViz.MovieScriptUsageModal(
-            this.app,
-            sourceFile,
-            rows,
-            openScript
-        ).open();
-    },
-
-    assetDependsOnTargets(assetPath, targets, inputMap, visited) {
-        const normalizedAsset = String(assetPath || "").toLowerCase();
-        if (!normalizedAsset) {
-            return false;
-        }
-
-        if (targets.has(normalizedAsset)) {
-            return true;
-        }
-
-        const seen = visited || new Set();
-        if (seen.has(normalizedAsset)) {
-            return false;
-        }
-        seen.add(normalizedAsset);
-
-        const inputs = inputMap.get(normalizedAsset);
-        if (!inputs || inputs.size === 0) {
-            return false;
-        }
-
-        for (const dep of inputs) {
-            if (this.assetDependsOnTargets(dep, targets, inputMap, seen)) {
-                return true;
-            }
-        }
-
-        return false;
-    },
-
-    async findMovieScriptsUsingAssets(assetPaths, excludeFilePath, options) {
-        const targets = new Set(
-            assetPaths
-                .map(value => String(value || "").toLowerCase())
-                .filter(Boolean)
-        );
-
-        if (targets.size === 0) {
-            return [];
-        }
-
-        const recursive = !options || options.recursive !== false;
-        const dependencyReport = await GPTViz.buildDependencyHeadingReport(this.app);
-        const records = dependencyReport.graph.records;
-
-        const inputMap = new Map();
-        for (const record of records) {
-            const outputPath = record.outputPath.toLowerCase();
-            if (!outputPath) {
-                continue;
-            }
-
-            if (!inputMap.has(outputPath)) {
-                inputMap.set(outputPath, new Set());
-            }
-
-            const bucket = inputMap.get(outputPath);
-            for (const value of record.resolvedInputs) {
-                const normalized = String(value || "").toLowerCase();
-                if (normalized) {
-                    bucket.add(normalized);
-                }
-            }
-        }
-
-        const rowsByPath = new Map();
 
         for (const record of records) {
-            if (record.operation !== "Script") {
+            if (record.operation !== "Script" || record.filePath === file.path) {
                 continue;
             }
-
-            if (excludeFilePath && record.filePath === excludeFilePath) {
-                continue;
+            const usesAsset = record.resolvedInputs.some(value => assets.has(String(value).toLowerCase()));
+            const note = usesAsset ? this.app.vault.getAbstractFileByPath(record.filePath) : null;
+            if (note) {
+                notesByPath.set(note.path, note);
             }
-
-            const matches = [];
-            for (const dep of record.resolvedInputs) {
-                const normalized = String(dep || "").toLowerCase();
-                const isMatch = targets.has(normalized) || (
-                    recursive && this.assetDependsOnTargets(normalized, targets, inputMap, new Set())
-                );
-
-                if (isMatch) {
-                    matches.push(dep);
-                }
-            }
-
-            if (matches.length === 0) {
-                continue;
-            }
-
-            const existing = rowsByPath.get(record.filePath);
-            if (!existing) {
-                rowsByPath.set(record.filePath, {
-                    name: record.fileName ? record.fileName.replace(/\.md$/i, "") : record.filePath,
-                    path: record.filePath,
-                    matches: [...new Set(matches)]
-                });
-                continue;
-            }
-
-            const merged = new Set([...(existing.matches || []), ...matches]);
-            existing.matches = [...merged];
         }
 
-        return [...rowsByPath.values()].sort((left, right) => left.name.localeCompare(right.name));
+        return [...notesByPath.values()].sort((left, right) => left.basename.localeCompare(right.basename));
     },
 
-    async handleMarkdownMovieModeRequest(file, leaf, options) {
+    // MovieMode on a note (Markdown or Candidate View). A note with Script headings plays one,
+    // asking which when there are several. Otherwise it jumps to the Script note that uses the
+    // note's assets, asking which when there are several.
+    async handleMarkdownMovieModeRequest(file) {
         if (!file || file.extension !== "md") {
             await this.requestMovieMode({
                 source: "markdown-view",
@@ -460,38 +237,54 @@ Object.assign(GPTViz.Plugin.prototype, {
             return;
         }
 
-        if (this.markdownFileHasScriptHeading(file)) {
+        const scriptHeadings = await this.getScriptHeadingsForMarkdownFile(file);
+        const playScript = async heading => {
             await this.requestMovieMode({
                 source: "markdown-view",
-                filePath: file.path
+                filePath: file.path,
+                scriptLine: heading.line
             });
+        };
+
+        if (scriptHeadings.length === 1) {
+            await playScript(scriptHeadings[0]);
             return;
         }
 
-        const preferredAssetPath = options && typeof options.preferredAssetPath === "string"
-            ? options.preferredAssetPath
-            : "";
-
-        if (preferredAssetPath) {
-            await this.showMovieScriptUsageForAssets(file, [preferredAssetPath], leaf);
+        if (scriptHeadings.length > 1) {
+            new GPTViz.PickListModal(
+                this.app,
+                `Play which script in ${file.basename}?`,
+                scriptHeadings.map(heading => ({ label: heading.label, value: heading })),
+                "",
+                async heading => {
+                    try {
+                        await playScript(heading);
+                    } catch (error) {
+                        this.reportError("playing a script", error);
+                    }
+                }
+            ).open();
             return;
         }
 
-        const assetRows = await this.getMovieModeAssetRowsForMarkdownFile(file);
-        const cursorLine = this.getCursorLineForMovieMode(file, leaf);
-        const orderedRows = this.prioritizeMovieModeAssetRowsByCursor(assetRows, cursorLine);
-
-        if (orderedRows.length === 1) {
-            await this.showMovieScriptUsageForAssets(file, [orderedRows[0].assetPath], leaf);
+        const scriptNotes = await this.findScriptNotesUsingNote(file);
+        if (scriptNotes.length === 1) {
+            await this.openNote(scriptNotes[0]);
             return;
         }
 
-        new GPTViz.MovieAssetUsageModal(
+        new GPTViz.PickListModal(
             this.app,
-            file,
-            orderedRows,
-            async row => {
-                await this.showMovieScriptUsageForAssets(file, [row.assetPath], leaf);
+            `Scripts using ${file.basename}`,
+            scriptNotes.map(note => ({ label: note.basename, value: note })),
+            `No script uses an asset from ${file.basename}.`,
+            async note => {
+                try {
+                    await this.openNote(note);
+                } catch (error) {
+                    this.reportError("opening a script note", error);
+                }
             }
         ).open();
     }
