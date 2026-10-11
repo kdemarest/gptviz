@@ -1,13 +1,27 @@
 unit("generate", ["plugin"], () => {
 Object.assign(GPTViz.Plugin.prototype, {
-    async getCurrentPromptForFile(file) {
-        const editor = this.getMarkdownEditor(file);
-        if (!editor) {
-            return null;
+    // A note's text as saved. A loaded editor showing the note is saved first, so typing
+    // from the last moments (before Obsidian's autosave) counts.
+    async readNoteText(file) {
+        for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+            if (leaf.view instanceof GPTViz.obsidian.MarkdownView && leaf.view.file?.path === file.path) {
+                await leaf.view.save();
+            }
         }
+        return await this.app.vault.read(file);
+    },
 
-        const section = GPTViz.getPromptSection(editor);
+    // The asset being worked on: the Candidate View's, else the note's selected or default one.
+    getWorkingAssetPath(file, candidateView) {
+        return candidateView && candidateView.assetPath
+            ? GPTViz.normalizeDependencyAssetPath(candidateView.assetPath, ".png")
+            : this.getActiveCandidateAssetPath(file);
+    },
 
+    // The resolved prompt text that produces assetPath, or null when no Prompt produces it
+    // (e.g. Extract outputs).
+    async getCurrentPromptForFile(file, assetPath) {
+        const section = GPTViz.findPromptSectionForAsset(await this.readNoteText(file), assetPath, file.basename);
         if (!section) {
             return null;
         }
@@ -15,62 +29,54 @@ Object.assign(GPTViz.Plugin.prototype, {
         const resolvedSectionText = await GPTViz.expandIncludesInText(
             this.app,
             section.text,
-            file && file.path ? file.path : "",
-            [file && file.path ? file.path : "<inline>"],
+            file.path,
+            [file.path],
             8,
             { disallowIncludedImagesTag: true }
         );
 
-        return GPTViz.getPromptParts({
-            text: resolvedSectionText
-        }).text;
+        return GPTViz.getPromptParts({ text: resolvedSectionText }).text;
     },
 
-    async alignMarkdownPrompt(file, savedPrompt) {
-        const editor = this.getMarkdownEditor(file);
-        if (!editor) {
-            throw new Error(
-                this.describeMarkdownEditorFailure(file)
-            );
-        }
+    // Rewrites the Prompt section for assetPath to savedPrompt, keeping its heading and Images: lines.
+    async alignMarkdownPrompt(file, assetPath, savedPrompt) {
+        await this.readNoteText(file);
+        await this.app.vault.process(file, text => {
+            const section = GPTViz.findPromptSectionForAsset(text, assetPath, file.basename);
+            if (!section) {
+                throw new Error(`${file.path} has no Prompt section for ${assetPath}.`);
+            }
 
-        const section = GPTViz.getPromptSection(editor);
-        if (!section) {
-            throw new Error("No Prompt section found in the Markdown file.");
-        }
+            const lines = text.split("\n");
+            const sectionLines = section.text.split("\n");
+            const imageLines = sectionLines.filter(line => /^[ \t]*Images:[ \t]*(.*)$/i.test(line));
+            const savedLines = savedPrompt.split("\n");
+            const savedHeading = GPTViz.parseHeading(savedLines[0]);
+            const alignedLines = [
+                sectionLines[0],
+                ...imageLines,
+                ...(savedHeading ? savedLines.slice(1) : savedLines)
+            ];
 
-        const sectionLines = section.text.split("\n");
-        const imageLines = sectionLines.filter(
-            line => /^[ \t]*Images:[ \t]*(.*)$/i.test(line)
-        );
-        const savedLines = savedPrompt.split("\n");
-        const savedHeading = GPTViz.parseHeading(savedLines[0]);
-        const alignedLines = [
-            sectionLines[0],
-            ...imageLines,
-            ...(savedHeading ? savedLines.slice(1) : savedLines)
-        ];
-        const endLine = section.endLine - 1;
-        const endChar = editor.getLine(endLine).length;
-
-        editor.replaceRange(
-            alignedLines.join("\n"),
-            { line: section.startLine, ch: 0 },
-            { line: endLine, ch: endChar }
-        );
+            return [...lines.slice(0, section.startLine), ...alignedLines, ...lines.slice(section.endLine)].join("\n");
+        });
     },
 
     async generateActiveMarkdown(file, progressView) {
-        const requestedFile = file || this.getCurrentMarkdownFile();
-        const editor = this.getMarkdownEditor(requestedFile);
-
-        if (!editor) {
-            throw new Error(
-                this.describeMarkdownEditorFailure(requestedFile)
-            );
+        const activeFile = file || this.getCurrentMarkdownFile();
+        if (!activeFile) {
+            new GPTViz.obsidian.Notice("GPTViz: no active Markdown file.");
+            return;
         }
 
-        await this.generate(editor, requestedFile, progressView);
+        const assetPath = this.getWorkingAssetPath(activeFile, progressView);
+        const section = GPTViz.findPromptSectionForAsset(await this.readNoteText(activeFile), assetPath, activeFile.basename);
+        if (!section) {
+            new GPTViz.obsidian.Notice(`GPTViz: ${activeFile.basename} has no Prompt section for ${assetPath}.`);
+            return;
+        }
+
+        await this.generate(section, activeFile, assetPath, progressView);
     },
 
     async resolveCompanionPromptForImagePath(imagePath, fallbackMarkdownFile) {
@@ -164,23 +170,10 @@ Object.assign(GPTViz.Plugin.prototype, {
             candidate.file.name
         );
 
-        const secretName = this.settings.apiKeySecret;
-        const apiKey = secretName
-            ? this.app.secretStorage.getSecret(secretName)
-            : "";
-
+        const apiKey = this.getApiKey();
         if (!apiKey) {
-            new GPTViz.obsidian.Notice(
-                secretName
-                    ? "GPTViz: API key not found."
-                    : "GPTViz: API key not configured."
-            );
             return;
         }
-
-        let progressOwner = progressView || this.getCandidateView();
-        let cancelled = false;
-        let generationStartedAt;
 
         try {
             let sourceBinary = await this.app.vault.readBinary(candidate.file);
@@ -265,159 +258,30 @@ Object.assign(GPTViz.Plugin.prototype, {
                 originalPrompt = promptParts.text;
             }
 
-            const targetAssetPath = progressView && progressView.assetPath
-                ? GPTViz.normalizeDependencyAssetPath(progressView.assetPath, ".png")
-                : this.getActiveCandidateAssetPath(activeFile);
-            const targetAssetName = targetAssetPath.split("/").pop() || `${activeFile.basename}.png`;
-            const targetAssetBaseName = targetAssetName.replace(/\.[^./]+$/, "");
+            const targetAssetPath = this.getWorkingAssetPath(activeFile, progressView);
 
-            const existingCandidates = GPTViz.getImageCandidates(
-                this.app,
-                activeFile,
-                targetAssetPath
-            );
-            const predictedNumber = existingCandidates.length > 0
-                ? existingCandidates[existingCandidates.length - 1].number + 1
-                : 1;
-            const predictedCandidateName =
-                `${targetAssetBaseName}-${predictedNumber}.png`;
-
-            generationStartedAt = Date.now();
-            const estimatedDurationMs =
-                this.lastGenerationDurationMs || 60000;
-
-            progressOwner = progressOwner || this.getCandidateView();
-            if (progressOwner) {
-                progressOwner.showProgressOverlay(() => {
-                    cancelled = true;
-                    progressOwner.hideProgressOverlay();
-                    new GPTViz.obsidian.Notice(
-                        "GPTViz: polishing cancelled."
-                    );
-                }, estimatedDurationMs, predictedCandidateName);
-            }
-
-            const result = await GPTViz.generateOpenAIResponse(
-                apiKey,
-                promptParts.text,
-                loadedImages.imageInputs
-            );
-
-            if (cancelled) {
-                return;
-            }
-
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-
-            if (!result.imageBase64) {
-                new GPTViz.ResponseModal(
-                    this.app,
-                    result.text || "The API returned no image."
-                ).open();
-                return;
-            }
-
-            this.lastGenerationDurationMs =
-                Date.now() - generationStartedAt;
-
-            await GPTViz.ensureFolder(this.app, GPTViz.contentPath("candidates"));
-
-            const candidates = GPTViz.getImageCandidates(
-                this.app,
-                activeFile,
-                targetAssetPath
-            );
-            const number = candidates.length > 0
-                ? candidates[candidates.length - 1].number + 1
-                : 1;
-            const candidatePath =
-                GPTViz.contentPath(`candidates/${targetAssetBaseName}-${number}.png`);
-            const binary = atob(result.imageBase64);
-            const bytes = new Uint8Array(binary.length);
-
-            for (let index = 0; index < binary.length; index++) {
-                bytes[index] = binary.charCodeAt(index);
-            }
-
-            const pngWithPrompt = GPTViz.embedPromptInPng(
-                bytes.buffer,
-                originalPrompt
-            );
-
-            await this.app.vault.createBinary(
-                candidatePath,
-                pngWithPrompt
-            );
-
-            await this.openCandidateView(candidatePath);
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz: wrote ${candidatePath}`
+            await this.runWithProgress(
+                progressView,
+                this.nextCandidatePath(activeFile, targetAssetPath).name,
+                this.lastGenerationDurationMs || 60000,
+                "GPTViz: polishing cancelled.",
+                async isCancelled => {
+                    const result = await this.requestImage(apiKey, promptParts.text, loadedImages.imageInputs);
+                    if (!isCancelled()) {
+                        await this.saveGeneratedCandidate(activeFile, targetAssetPath, result, originalPrompt);
+                    }
+                }
             );
         } catch (error) {
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-
-            if (cancelled) {
-                return;
-            }
-
             this.reportError("polishing an image", error);
         }
     },
 
-    async generate(editor, requestedFile, progressView) {
-        const section = GPTViz.getPromptSection(editor);
-
-        if (!section) {
-            new GPTViz.obsidian.Notice(
-                "GPTViz: no Prompt section found."
-            );
-            return;
-        }
-
-        const secretName = this.settings.apiKeySecret;
-        const apiKey = secretName
-            ? this.app.secretStorage.getSecret(secretName)
-            : "";
-
+    async generate(section, activeFile, targetAssetPath, progressView) {
+        const apiKey = this.getApiKey();
         if (!apiKey) {
-            new GPTViz.obsidian.Notice(
-                secretName
-                    ? "GPTViz: API key not found."
-                    : "GPTViz: API key not configured."
-            );
             return;
         }
-
-        const activeFile = requestedFile || this.getCurrentMarkdownFile();
-
-        if (!activeFile) {
-            new GPTViz.obsidian.Notice(
-                "GPTViz: no active Markdown file."
-            );
-            return;
-        }
-
-        const targetAssetPath = this.getActiveCandidateAssetPath(activeFile);
-        const targetAssetName = targetAssetPath.split("/").pop() || `${activeFile.basename}.png`;
-        const targetAssetBaseName = targetAssetName.replace(/\.[^./]+$/, "");
-        const candidates = GPTViz.getImageCandidates(
-            this.app,
-            activeFile,
-            targetAssetPath
-        );
-        const number = candidates.length > 0
-            ? candidates[candidates.length - 1].number + 1
-            : 1;
-        const candidateName = `${targetAssetBaseName}-${number}.png`;
-
-        let progressOwner = progressView || this.getCandidateView();
-        let cancelled = false;
-        let generationStartedAt;
 
         try {
             const resolvedPromptSectionText = await GPTViz.expandIncludesInText(
@@ -444,90 +308,19 @@ Object.assign(GPTViz.Plugin.prototype, {
                 return;
             }
 
-            const imageInputs = loadedImages.imageInputs;
-            generationStartedAt = Date.now();
-            const estimatedDurationMs =
-                this.lastGenerationDurationMs || 60000;
-
-            progressOwner = progressOwner || this.getCandidateView();
-            if (progressOwner) {
-                progressOwner.showProgressOverlay(() => {
-                    cancelled = true;
-                    progressOwner.hideProgressOverlay();
-                    new GPTViz.obsidian.Notice(
-                        "GPTViz: generation cancelled."
-                    );
-                }, estimatedDurationMs, candidateName);
-            }
-
-            const result =
-                await GPTViz.generateOpenAIResponse(
-                    apiKey,
-                    promptParts.text,
-                    imageInputs
-                );
-
-            if (cancelled) {
-                return;
-            }
-
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-
-            if (!result.imageBase64) {
-                new GPTViz.ResponseModal(
-                    this.app,
-                    result.text || "The API returned no image."
-                ).open();
-                return;
-            }
-
-            this.lastGenerationDurationMs =
-                Date.now() - generationStartedAt;
-
-            await GPTViz.ensureFolder(this.app, GPTViz.contentPath("candidates"));
-
-            const saveCandidates = GPTViz.getImageCandidates(
-                this.app,
-                activeFile,
-                targetAssetPath
-            );
-            const saveNumber = saveCandidates.length > 0
-                ? saveCandidates[saveCandidates.length - 1].number + 1
-                : 1;
-            const candidatePath = GPTViz.contentPath(`candidates/${targetAssetBaseName}-${saveNumber}.png`);
-            const binary = atob(result.imageBase64);
-            const bytes = new Uint8Array(binary.length);
-
-            for (let index = 0; index < binary.length; index++) {
-                bytes[index] = binary.charCodeAt(index);
-            }
-
-            const pngWithPrompt = GPTViz.embedPromptInPng(
-                bytes.buffer,
-                promptParts.text
-            );
-
-            await this.app.vault.createBinary(
-                candidatePath,
-                pngWithPrompt
-            );
-
-            await this.openCandidateView(candidatePath);
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz: wrote ${candidatePath}`
+            await this.runWithProgress(
+                progressView,
+                this.nextCandidatePath(activeFile, targetAssetPath).name,
+                this.lastGenerationDurationMs || 60000,
+                "GPTViz: generation cancelled.",
+                async isCancelled => {
+                    const result = await this.requestImage(apiKey, promptParts.text, loadedImages.imageInputs);
+                    if (!isCancelled()) {
+                        await this.saveGeneratedCandidate(activeFile, targetAssetPath, result, promptParts.text);
+                    }
+                }
             );
         } catch (error) {
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-
-            if (cancelled) {
-                return;
-            }
-
             this.reportError("generating an image", error);
         }
     }

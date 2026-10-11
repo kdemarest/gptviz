@@ -125,6 +125,15 @@ Object.assign(GPTViz.Plugin.prototype, {
             // Build the pane menu directly, as Obsidian's own "More options" button does.
             const menu = new GPTViz.obsidian.Menu();
             view.onPaneMenu(menu, "more-options");
+            menu.addSeparator();
+            menu.addItem(item => item
+                .setTitle("Check dependencies")
+                .setIcon("git-branch")
+                .onClick(() => {
+                    this.validateDependencyHeadings().catch(error => {
+                        this.reportError("checking dependencies", error);
+                    });
+                }));
 
             const rect = buttonEl.getBoundingClientRect();
             menu.showAtPosition({ x: rect.right, y: rect.bottom });
@@ -242,6 +251,27 @@ Object.assign(GPTViz.Plugin.prototype, {
             ? Number.parseFloat(sourceIconStyle.height)
             : NaN;
 
+        const backButtonEl = this.getBackButton(view);
+        if (backButtonEl) {
+            Object.assign(backButtonEl.style, {
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxSizing: "border-box",
+                padding: "0",
+                margin: "0",
+                marginInlineStart: "auto",
+                width: `${targetWidth}px`,
+                minWidth: `${targetWidth}px`,
+                height: `${compactHeight}px`,
+                minHeight: `${compactHeight}px`,
+                backgroundColor,
+                border,
+                borderRadius,
+                boxShadow
+            });
+        }
+
         ribbonButtons.forEach((buttonEl, index) => {
             const isLast = index === ribbonButtons.length - 1;
 
@@ -297,27 +327,56 @@ Object.assign(GPTViz.Plugin.prototype, {
         const dependsModeButtonEl = this.getModeRibbonButton(view, "DependsMode");
         const moreActionsButtonEl = this.getModeRibbonButton(view, "MoreActions");
 
-        const hasMarkdownTarget = isMarkdown
-            ? Boolean(view.leaf)
-            : isCandidate
-                ? Boolean(view.activeFile)
-                : Boolean(this.resolveMovieSourceMarkdownFile(view));
-        this.setModeButtonEnabled(markdownModeButtonEl, hasMarkdownTarget);
+        // Mode buttons show the viewed thing in another form; a button is grey when that
+        // form doesn't exist or is the one already showing. DependsMode moves to what the
+        // thing is made from.
+        const movieSourceFile = isMovie ? this.resolveMovieSourceMarkdownFile(view) : null;
+        const markdownModeEnabled = isCandidate ? Boolean(view.activeFile) : isMovie && Boolean(movieSourceFile);
+        const imageModeEnabled = isMarkdown && Boolean(view.file) && this.markdownFileCanOpenCandidateView(view.file);
+        const movieModeEnabled = !isMovie;
+        const dependsModeEnabled = isMarkdown ? Boolean(view.file)
+            : isCandidate ? Boolean(view.activeFile)
+                : Boolean(movieSourceFile);
 
-        let canOpenImageMode = true;
-        if (isMarkdown) {
-            canOpenImageMode = Boolean(view.file && this.markdownFileCanOpenCandidateView(view.file));
-        } else if (isMovie) {
-            const sourceFile = this.resolveMovieSourceMarkdownFile(view);
-            canOpenImageMode = Boolean(sourceFile && this.markdownFileCanOpenCandidateView(sourceFile));
-        } else if (isCandidate) {
-            canOpenImageMode = Boolean(view.activeFile && this.markdownFileCanOpenCandidateView(view.activeFile));
-        }
-        this.setModeButtonEnabled(imageModeButtonEl, canOpenImageMode);
-
-        this.setModeButtonEnabled(movieModeButtonEl, true);
-        this.setModeButtonEnabled(dependsModeButtonEl, true);
+        this.setModeButtonEnabled(markdownModeButtonEl, markdownModeEnabled);
+        this.setModeButtonEnabled(imageModeButtonEl, imageModeEnabled);
+        this.setModeButtonEnabled(movieModeButtonEl, movieModeEnabled);
+        this.setModeButtonEnabled(dependsModeButtonEl, dependsModeEnabled);
         this.setModeButtonEnabled(moreActionsButtonEl, true);
+        this.setModeButtonEnabled(this.getBackButton(view), this.hasBackPlace());
+    },
+
+    getBackButton(view) {
+        return view && view.containerEl
+            ? view.containerEl.querySelector(".view-header > .gptviz-back-button")
+            : null;
+    },
+
+    // Back sits in the header just left of the ribbon, as its own button. Rebuilt with the
+    // ribbon so its handler belongs to the current plugin load.
+    buildBackButton(view, ribbon) {
+        const existing = this.getBackButton(view);
+        if (existing) {
+            existing.remove();
+        }
+
+        const backButtonEl = document.createElement("button");
+        backButtonEl.classList.add("clickable-icon", "gptviz-back-button");
+        backButtonEl.setAttribute("aria-label", "Back");
+        backButtonEl.setAttribute("title", "Back");
+        backButtonEl.setAttribute("type", "button");
+        GPTViz.obsidian.setIcon(backButtonEl, "arrow-left");
+        backButtonEl.addEventListener("click", async () => {
+            try {
+                await this.goBack(view);
+            } catch (error) {
+                this.reportError("going back", error);
+            }
+        });
+
+        ribbon.parentElement.insertBefore(backButtonEl, ribbon);
+        backButtonEl.style.marginInlineStart = "auto";
+        ribbon.style.marginInlineStart = "6px";
     },
 
     isModeRibbonView(view) {
@@ -340,12 +399,14 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
 
         const isCurrent = ribbon.getAttribute("data-gptviz-load") === this.modeRibbonLoadId &&
-            GPTViz.MODE_RIBBON_KEYS.every(key => this.getModeRibbonButton(view, key));
+            GPTViz.MODE_RIBBON_KEYS.every(key => this.getModeRibbonButton(view, key)) &&
+            Boolean(this.getBackButton(view));
 
         if (!isCurrent) {
             ribbon.empty();
             ribbon.setAttribute("data-gptviz-load", this.modeRibbonLoadId);
             this.buildModeRibbonButtons(view);
+            this.buildBackButton(view, ribbon);
         }
 
         this.applyModeRibbonButtonStatesForView(view);
@@ -373,17 +434,6 @@ Object.assign(GPTViz.Plugin.prototype, {
 
                 if (isMovie) {
                     await this.returnToMovieSourceNote(view);
-                    return;
-                }
-
-                if (isMarkdown && (this.markdownFileHasScriptHeading(view.file) ||
-                    this.markdownFileHasPromptHeading(view.file))) {
-                    await this.showNoteResources(view.file, view.leaf);
-                    return;
-                }
-
-                if (view.leaf) {
-                    await this.app.workspace.revealLeaf(view.leaf);
                 }
             } catch (error) {
                 this.reportError("switching to MarkdownMode", error);
@@ -401,21 +451,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         imageModeButtonEl.addEventListener("click", async () => {
             try {
                 if (isMarkdown) {
-                    if (!this.markdownFileCanOpenCandidateView(view.file)) {
-                        return;
-                    }
                     await this.handleMarkdownImageModeRequest(view.file, view.leaf);
-                    return;
-                }
-
-                if (isMovie) {
-                    await this.openCandidateViewForMovieSource(view);
-                    return;
-                }
-
-                if (isCandidate) {
-                    await this.handleMarkdownImageModeRequest(view.activeFile || null, view.leaf);
-                    return;
                 }
             } catch (error) {
                 this.reportError("switching to ImageMode", error);
@@ -432,27 +468,9 @@ Object.assign(GPTViz.Plugin.prototype, {
         GPTViz.obsidian.setIcon(movieModeButtonEl, "film");
         movieModeButtonEl.addEventListener("click", async () => {
             try {
-                if (isMarkdown) {
-                    await this.handleMarkdownMovieModeRequest(view.file, view.leaf);
-                    return;
+                if (isMarkdown || isCandidate) {
+                    await this.handleMarkdownMovieModeRequest(isMarkdown ? view.file : view.activeFile || null);
                 }
-
-                if (isCandidate) {
-                    const preferredAssetPath = this.getCandidateAssetPathForMovieMode(view);
-                    await this.handleMarkdownMovieModeRequest(
-                        view.activeFile || null,
-                        view.leaf,
-                        { preferredAssetPath }
-                    );
-                    return;
-                }
-
-                const filePath = this.resolveMovieSourceMarkdownFile(view)?.path || null;
-
-                await this.requestMovieMode({
-                    source: "movie-view",
-                    filePath
-                });
             } catch (error) {
                 this.reportError("switching to MovieMode", error);
             }
@@ -467,7 +485,11 @@ Object.assign(GPTViz.Plugin.prototype, {
         dependencyActionEl.setAttribute("data-mode-button-key", "DependsMode");
         GPTViz.obsidian.setIcon(dependencyActionEl, "git-branch");
         dependencyActionEl.addEventListener("click", async () => {
-            await this.validateDependencyHeadings();
+            try {
+                await this.handleDependsModeRequest(view);
+            } catch (error) {
+                this.reportError("switching to DependsMode", error);
+            }
         });
         this.addModeButton(view, 4, dependencyActionEl);
 
@@ -490,7 +512,8 @@ Object.assign(GPTViz.Plugin.prototype, {
             .view-header:has(> .mode-ribbon) > .view-actions {
                 display: none !important;
             }
-            .view-header > .mode-ribbon {
+            .view-header > .mode-ribbon,
+            .view-header > .gptviz-back-button {
                 flex-shrink: 0;
             }
         `;
@@ -501,7 +524,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         this.app.workspace.iterateAllLeaves(leaf => {
             const containerEl = leaf.view && leaf.view.containerEl;
             if (containerEl) {
-                containerEl.querySelectorAll(".mode-ribbon").forEach(ribbon => ribbon.remove());
+                containerEl.querySelectorAll(".mode-ribbon, .gptviz-back-button").forEach(el => el.remove());
             }
         });
 

@@ -132,17 +132,8 @@ Object.assign(GPTViz.Plugin.prototype, {
             throw new Error("No active Markdown file for Extract operation.");
         }
 
-        const secretName = this.settings.apiKeySecret;
-        const apiKey = secretName
-            ? this.app.secretStorage.getSecret(secretName)
-            : "";
-
+        const apiKey = this.getApiKey();
         if (!apiKey) {
-            new GPTViz.obsidian.Notice(
-                secretName
-                    ? "GPTViz: API key not found."
-                    : "GPTViz: API key not configured."
-            );
             return;
         }
 
@@ -167,90 +158,81 @@ Object.assign(GPTViz.Plugin.prototype, {
             }
         }
 
-        let progressOwner = candidateView || this.getCandidateView();
-        let cancelled = false;
-        const estimatedDurationMs = Math.max(10000, blocksToRun.length * 14000);
         const progressName = blocksToRun.length === 1
             ? blocksToRun[0].asset
             : `${activeFile.basename}.extract`;
 
-        if (progressOwner) {
-            progressOwner.showProgressOverlay(() => {
-                cancelled = true;
-                progressOwner.hideProgressOverlay();
-                new GPTViz.obsidian.Notice("GPTViz: extract cancelled.");
-            }, estimatedDurationMs, progressName);
-        }
+        await this.runWithProgress(
+            candidateView,
+            progressName,
+            Math.max(10000, blocksToRun.length * 14000),
+            "GPTViz: extract cancelled.",
+            async isCancelled => {
+                const writtenAssets = [];
 
-        try {
-            const writtenAssets = [];
+                for (const block of blocksToRun) {
+                    if (isCancelled()) {
+                        return;
+                    }
 
-            for (const block of blocksToRun) {
-                if (cancelled) {
-                    return;
-                }
+                    const sourceName = block.source || `${activeFile.basename}.png`;
+                    const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
 
-                const sourceName = block.source || `${activeFile.basename}.png`;
-                const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
+                    if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
+                        throw new Error(
+                            `Extract source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                        );
+                    }
 
-                if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
-                    throw new Error(
-                        `Extract source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                    const resolvedExtractPrompt = await GPTViz.expandIncludesInText(
+                        this.app,
+                        block.prompt,
+                        activeFile.path,
+                        [`${activeFile.path}#Extract:${block.asset}`],
+                        8,
+                        { disallowIncludedImagesTag: true }
                     );
-                }
 
-                const resolvedExtractPrompt = await GPTViz.expandIncludesInText(
-                    this.app,
-                    block.prompt,
-                    activeFile.path,
-                    [`${activeFile.path}#Extract:${block.asset}`],
-                    8,
-                    { disallowIncludedImagesTag: true }
-                );
-
-                const response = await GPTViz.generateOpenAIImageResponseDetailed(
-                    apiKey,
-                    resolvedExtractPrompt,
-                    loaded.imageInputs
-                );
-
-                if (cancelled) {
-                    return;
-                }
-
-                if (!response.imageBase64s || response.imageBase64s.length === 0) {
-                    throw new Error(
-                        `Extract generation error at ${activeFile.path}:${block.line} - missing AI image payload.`
+                    const response = await GPTViz.generateOpenAIImageResponseDetailed(
+                        apiKey,
+                        resolvedExtractPrompt,
+                        loaded.imageInputs
                     );
+
+                    if (isCancelled()) {
+                        return;
+                    }
+
+                    if (!response.imageBase64s || response.imageBase64s.length === 0) {
+                        throw new Error(
+                            `Extract generation error at ${activeFile.path}:${block.line} - missing AI image payload.`
+                        );
+                    }
+
+                    if (response.imageBase64s.length > 1) {
+                        new GPTViz.obsidian.Notice(
+                            `GPTViz: multiple images returned for ${block.asset}; using the first.`
+                        );
+                    }
+
+                    const rawPng = GPTViz.base64ToArrayBuffer(response.imageBase64s[0]);
+                    const outputPng = await GPTViz.removeKeyColorFromPng(rawPng);
+
+                    await this.ensureParentFolders(GPTViz.contentPath(block.asset));
+                    await this.writeBinaryOverwrite(GPTViz.contentPath(block.asset), outputPng);
+                    writtenAssets.push(block.asset);
                 }
 
-                if (response.imageBase64s.length > 1) {
+                if (writtenAssets.length > 0) {
+                    const summary = writtenAssets.length <= 3
+                        ? writtenAssets.join(", ")
+                        : `${writtenAssets.slice(0, 3).join(", ")} +${writtenAssets.length - 3} more`;
                     new GPTViz.obsidian.Notice(
-                        `GPTViz: multiple images returned for ${block.asset}; using the first.`
+                        `GPTViz: wrote ${writtenAssets.length} extract${writtenAssets.length === 1 ? "" : "s"}: ${summary}`
                     );
                 }
-
-                const rawPng = GPTViz.base64ToArrayBuffer(response.imageBase64s[0]);
-                const outputPng = await GPTViz.removeKeyColorFromPng(rawPng);
-
-                await this.ensureParentFolders(GPTViz.contentPath(block.asset));
-                await this.writeBinaryOverwrite(GPTViz.contentPath(block.asset), outputPng);
-                writtenAssets.push(block.asset);
             }
-
-            if (writtenAssets.length > 0) {
-                const summary = writtenAssets.length <= 3
-                    ? writtenAssets.join(", ")
-                    : `${writtenAssets.slice(0, 3).join(", ")} +${writtenAssets.length - 3} more`;
-                new GPTViz.obsidian.Notice(
-                    `GPTViz: wrote ${writtenAssets.length} extract${writtenAssets.length === 1 ? "" : "s"}: ${summary}`
-                );
-            }
-        } finally {
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-        }
+        );
     },
 
     async markActiveMarkdown(file, candidateView) {
@@ -259,17 +241,8 @@ Object.assign(GPTViz.Plugin.prototype, {
             throw new Error("No active Markdown file for Mark operation.");
         }
 
-        const secretName = this.settings.apiKeySecret;
-        const apiKey = secretName
-            ? this.app.secretStorage.getSecret(secretName)
-            : "";
-
+        const apiKey = this.getApiKey();
         if (!apiKey) {
-            new GPTViz.obsidian.Notice(
-                secretName
-                    ? "GPTViz: API key not found."
-                    : "GPTViz: API key not configured."
-            );
             return;
         }
 
@@ -279,108 +252,98 @@ Object.assign(GPTViz.Plugin.prototype, {
             return;
         }
 
-        let progressOwner = candidateView || this.getCandidateView();
-        let cancelled = false;
-        const estimatedDurationMs = Math.max(10000, blocks.length * 12000);
+        await this.runWithProgress(
+            candidateView,
+            `${activeFile.basename}.marks.json`,
+            Math.max(10000, blocks.length * 12000),
+            "GPTViz: marking cancelled.",
+            async isCancelled => {
+                const marks = [];
 
-        if (progressOwner) {
-            progressOwner.showProgressOverlay(() => {
-                cancelled = true;
-                progressOwner.hideProgressOverlay();
-                new GPTViz.obsidian.Notice("GPTViz: marking cancelled.");
-            }, estimatedDurationMs, `${activeFile.basename}.marks.json`);
-        }
+                for (const block of blocks) {
+                    if (isCancelled()) {
+                        return;
+                    }
 
-        try {
-            const marks = [];
+                    const sourceName = block.source || `${activeFile.basename}.png`;
+                    const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
+                    if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
+                        throw new Error(
+                            `Mark source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                        );
+                    }
 
-            for (const block of blocks) {
-                if (cancelled) {
-                    return;
-                }
-
-                const sourceName = block.source || `${activeFile.basename}.png`;
-                const loaded = await GPTViz.loadPromptImages(this.app, [sourceName]);
-                if (loaded.warnings.length > 0 || loaded.imageInputs.length === 0) {
-                    throw new Error(
-                        `Mark source error at ${activeFile.path}:${block.line} - ${loaded.warnings[0] || `Could not load source image ${sourceName}`}`
+                    const resolvedMarkPrompt = await GPTViz.expandIncludesInText(
+                        this.app,
+                        block.prompt,
+                        activeFile.path,
+                        [`${activeFile.path}#Mark:${block.name}`],
+                        8,
+                        { disallowIncludedImagesTag: true }
                     );
+
+                    const prompt = [
+                        "Find one target point in the image.",
+                        `Target name: ${block.name}`,
+                        "Return only strict JSON with this exact shape:",
+                        '{"name":"<name>","x":0.5,"y":0.5,"confidence":0.0,"bbox":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}',
+                        "Rules:",
+                        "- x and y are normalized coordinates from 0 to 1.",
+                        "- (0,0) is top-left, (1,1) is bottom-right.",
+                        "- Use the exact target name.",
+                        "Task:",
+                        resolvedMarkPrompt
+                    ].join("\n");
+
+                    const responseText = await GPTViz.generateOpenAITextResponse(
+                        apiKey,
+                        prompt,
+                        loaded.imageInputs
+                    );
+
+                    if (isCancelled()) {
+                        return;
+                    }
+
+                    const point = this.parseMarkModelResponse(
+                        responseText,
+                        block.name,
+                        activeFile.path,
+                        block.line
+                    );
+
+                    marks.push({
+                        name: point.name,
+                        source: sourceName,
+                        x: point.x,
+                        y: point.y,
+                        confidence: point.confidence,
+                        bbox: point.bbox,
+                        line: block.line,
+                        prompt: block.prompt
+                    });
                 }
 
-                const resolvedMarkPrompt = await GPTViz.expandIncludesInText(
-                    this.app,
-                    block.prompt,
-                    activeFile.path,
-                    [`${activeFile.path}#Mark:${block.name}`],
-                    8,
-                    { disallowIncludedImagesTag: true }
+                const payload = {
+                    file: activeFile.path,
+                    updatedAt: new Date().toISOString(),
+                    marks
+                };
+                const sidecarPath = GPTViz.contentPath(`${activeFile.basename}.marks.json`);
+                await this.app.vault.adapter.write(
+                    sidecarPath,
+                    JSON.stringify(payload, null, 2)
                 );
 
-                const prompt = [
-                    "Find one target point in the image.",
-                    `Target name: ${block.name}`,
-                    "Return only strict JSON with this exact shape:",
-                    '{"name":"<name>","x":0.5,"y":0.5,"confidence":0.0,"bbox":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}',
-                    "Rules:",
-                    "- x and y are normalized coordinates from 0 to 1.",
-                    "- (0,0) is top-left, (1,1) is bottom-right.",
-                    "- Use the exact target name.",
-                    "Task:",
-                    resolvedMarkPrompt
-                ].join("\n");
-
-                const responseText = await GPTViz.generateOpenAITextResponse(
-                    apiKey,
-                    prompt,
-                    loaded.imageInputs
-                );
-
-                if (cancelled) {
-                    return;
+                if (candidateView) {
+                    await candidateView.setMarks(marks);
                 }
 
-                const point = this.parseMarkModelResponse(
-                    responseText,
-                    block.name,
-                    activeFile.path,
-                    block.line
+                new GPTViz.obsidian.Notice(
+                    `GPTViz: wrote ${marks.length} mark${marks.length === 1 ? "" : "s"} to ${sidecarPath}`
                 );
-
-                marks.push({
-                    name: point.name,
-                    source: sourceName,
-                    x: point.x,
-                    y: point.y,
-                    confidence: point.confidence,
-                    bbox: point.bbox,
-                    line: block.line,
-                    prompt: block.prompt
-                });
             }
-
-            const payload = {
-                file: activeFile.path,
-                updatedAt: new Date().toISOString(),
-                marks
-            };
-            const sidecarPath = GPTViz.contentPath(`${activeFile.basename}.marks.json`);
-            await this.app.vault.adapter.write(
-                sidecarPath,
-                JSON.stringify(payload, null, 2)
-            );
-
-            if (candidateView) {
-                await candidateView.setMarks(marks);
-            }
-
-            new GPTViz.obsidian.Notice(
-                `GPTViz: wrote ${marks.length} mark${marks.length === 1 ? "" : "s"} to ${sidecarPath}`
-            );
-        } finally {
-            if (progressOwner) {
-                progressOwner.hideProgressOverlay();
-            }
-        }
+        );
     }
 });
 });

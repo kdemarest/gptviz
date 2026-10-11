@@ -19,16 +19,12 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         this.setCandidateViewActive(false);
 
         this.lastGenerationDurationMs = null;
-        this.lastMarkdownFilePath =
-            this.lastMarkdownFilePath ||
-            this.app.workspace.getActiveFile()?.path || null;
         this.previousMarkdownLeaf = null;
         // Identifies ribbons built by this load, so a plugin reload rebuilds them once.
         this.modeRibbonLoadId = `${Date.now()}-${Math.random()}`;
         this.installModeRibbonStyle();
         this.errorModal = null;
         this.polishPromptCache = {};
-        this.openCandidateViewPromise = null;
         this.modeRibbonStateRefreshTimer = null;
 
         this.registerView(
@@ -38,12 +34,12 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         this.registerEvent(
             this.app.workspace.on("file-open", file => {
+                this.traceCandidate(`file-open ${file?.path}`); // TEMP
                 this.syncAllModeRibbons();
 
-                if (file && file.extension === "md") {
-                    this.rememberMarkdownFile(file);
-                    this.refreshCandidateViews().catch(error => {
-                        this.reportError("refreshing Candidate View after opening a Markdown file", error);
+                if (file && file.extension === "png") {
+                    this.openImageInCandidateView(file).catch(error => {
+                        this.reportError(`showing ${file.path} in Candidate View`, error);
                     });
                 }
             })
@@ -51,16 +47,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
 
         this.registerEvent(
             this.app.workspace.on("active-leaf-change", leaf => {
-                const isMarkdownView =
-                    leaf && leaf.view instanceof GPTViz.obsidian.MarkdownView;
-
-                if (isMarkdownView) {
-                    this.rememberMarkdownFile(leaf.view.file);
-                    this.refreshCandidateViews().catch(error => {
-                        this.reportError("refreshing Candidate View after activating a Markdown file", error);
-                    });
-                }
-
+                this.traceCandidate(`active-leaf-change ${leaf?.view?.getViewType?.()} ${leaf?.view?.file?.path}`); // TEMP
                 this.syncAllModeRibbons();
                 this.setCandidateViewActive(
                     this.isCandidateView(leaf && leaf.view)
@@ -115,7 +102,13 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         this.addCommand({
             id: "gpt-generate",
             name: "GPTViz Generate Image",
-            editorCallback: async editor => await this.generate(editor)
+            callback: async () => {
+                try {
+                    await this.generateActiveMarkdown(this.getCurrentMarkdownFile());
+                } catch (error) {
+                    this.reportError("generating an image", error);
+                }
+            }
         });
 
         this.addCommand({
@@ -123,7 +116,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             name: "GPTViz Review Images",
             callback: async () => {
                 try {
-                    await this.openCandidateView();
+                    await this.openCandidateView({ file: this.getCurrentMarkdownFile() });
                 } catch (error) {
                     this.reportError("opening Candidate View from the command", error);
                 }
@@ -164,14 +157,14 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             GPTViz.DEFAULT_SETTINGS,
             data
         );
-        this.lastMarkdownFilePath = data?.lastMarkdownFilePath || null;
+        // No longer saved: the Candidate View keeps its note in its own view state.
+        delete this.settings.lastMarkdownFilePath;
         this.lastCandidatePaths = data?.lastCandidatePaths || {};
     }
 
     async saveSettings() {
         await this.saveData({
             ...this.settings,
-            lastMarkdownFilePath: this.lastMarkdownFilePath,
             lastCandidatePaths: this.lastCandidatePaths
         });
     }
@@ -196,36 +189,36 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         }
     }
 
+    // The note the user is working on: the active Markdown view's, else the active Candidate
+    // View's. Null when neither is active.
     getCurrentMarkdownFile() {
-        const activeView = this.app.workspace.getActiveViewOfType(
-            GPTViz.obsidian.MarkdownView
-        );
-
-        if (activeView && activeView.file) {
-            this.lastMarkdownFilePath = activeView.file.path;
-            return activeView.file;
+        const workspace = this.app.workspace;
+        const markdownView = workspace.getActiveViewOfType(GPTViz.obsidian.MarkdownView);
+        if (markdownView && markdownView.file) {
+            return markdownView.file;
         }
 
-        if (this.lastMarkdownFilePath) {
-            const file = this.app.vault.getAbstractFileByPath(
-                this.lastMarkdownFilePath
-            );
-            if (file && file.extension === "md") {
-                return file;
-            }
+        const activeView = workspace.getMostRecentLeaf()?.view;
+        return this.isCandidateView(activeView) ? activeView.activeFile : null;
+    }
+
+    // Shows file in its existing tab, loading the tab if Obsidian deferred it, or in a new tab.
+    // Unloaded tabs have no view.file, so they are matched by their saved state.
+    async openNote(file) {
+        this.recordBackPlace();
+        const workspace = this.app.workspace;
+        let leaf = workspace.getLeavesOfType("markdown")
+            .find(candidate => candidate.getViewState().state?.file === file.path);
+
+        if (leaf) {
+            await workspace.revealLeaf(leaf);
+            await leaf.loadIfDeferred();
+        } else {
+            leaf = workspace.getLeaf(true);
+            await leaf.openFile(file);
         }
 
-        const recentLeaf = this.app.workspace.getMostRecentLeaf();
-        if (
-            recentLeaf &&
-            recentLeaf.view instanceof GPTViz.obsidian.MarkdownView &&
-            recentLeaf.view.file
-        ) {
-            this.rememberMarkdownFile(recentLeaf.view.file);
-            return recentLeaf.view.file;
-        }
-
-        return null;
+        return leaf;
     }
 
     getMarkdownEditor(file) {

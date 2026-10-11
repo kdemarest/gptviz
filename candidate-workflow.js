@@ -7,17 +7,61 @@ Object.assign(GPTViz.Plugin.prototype, {
         );
     },
 
-    rememberMarkdownFile(file) {
-        if (!file || file.extension !== "md") {
+    // The note whose Prompt produces this png (a kept image, or a candidate of one), found via
+    // Obsidian's heading index: a Prompt named for the asset, or a note's unnamed Prompt for
+    // <note>.png. Null for images no Prompt produces.
+    findPromptNoteForImage(file) {
+        if (!GPTViz.isContentFile(file)) {
+            return null;
+        }
+
+        const contentRelativePath = file.path.slice(GPTViz.contentPath("").length);
+        const candidateMatch = /^candidates\/(.+)-\d+\.png$/i.exec(contentRelativePath);
+        const asset = candidateMatch ? `${candidateMatch[1]}.png` : contentRelativePath;
+        const target = asset.toLowerCase();
+
+        for (const note of this.app.vault.getMarkdownFiles().filter(GPTViz.isContentFile)) {
+            const headings = this.app.metadataCache.getFileCache(note)?.headings ?? [];
+            for (const { heading } of headings) {
+                const line = `# ${heading}`;
+                if (!GPTViz.isPromptHeading(line)) {
+                    continue;
+                }
+                const parsed = GPTViz.parseDependencyOperationHeading(line);
+                const produces = parsed
+                    ? GPTViz.normalizeDependencyAssetPath(parsed.name, ".png")
+                    : `${note.basename}.png`;
+                if (produces.toLowerCase() === target) {
+                    return { note, asset: produces, isCandidate: Boolean(candidateMatch) };
+                }
+            }
+        }
+
+        return null;
+    },
+
+    // Opening a generated png shows it in the Candidate View (that exact candidate, or the kept
+    // image) instead of Obsidian's image viewer, whose tab is then closed.
+    async openImageInCandidateView(file) {
+        const match = this.findPromptNoteForImage(file);
+        if (!match) {
             return;
         }
 
-        this.lastMarkdownFilePath = file.path;
-        this.saveData({
-            ...this.settings,
-            lastMarkdownFilePath: this.lastMarkdownFilePath,
-            lastCandidatePaths: this.lastCandidatePaths
-        }).catch(error => this.reportError("saving GPTViz settings", error));
+        const imageLeaf = this.app.workspace.getLeavesOfType("image")
+            .find(leaf => leaf.view.file?.path === file.path);
+
+        await this.openAssetInCandidateView(match.note, match.asset, match.isCandidate ? file.path : null);
+
+        if (imageLeaf) {
+            imageLeaf.detach();
+        }
+    },
+
+    // Candidate View on a note's asset, showing candidatePath, or the kept image when null.
+    async openAssetInCandidateView(note, asset, candidatePath) {
+        this.setSelectedCandidateAssetPath(note.path, asset);
+        await this.openCandidateView({ file: note, asset, candidate: candidatePath, kept: !candidatePath });
     },
 
     getLastCandidatePath(markdownPath) {
@@ -32,7 +76,6 @@ Object.assign(GPTViz.Plugin.prototype, {
         this.lastCandidatePaths[markdownPath] = candidatePath;
         this.saveData({
             ...this.settings,
-            lastMarkdownFilePath: this.lastMarkdownFilePath,
             lastCandidatePaths: this.lastCandidatePaths
         }).catch(error => this.reportError("saving GPTViz settings", error));
     },
@@ -56,58 +99,10 @@ Object.assign(GPTViz.Plugin.prototype, {
         const normalized = GPTViz.normalizeDependencyAssetPath(assetPath, ".png");
         if (!normalized) {
             delete this.selectedCandidateAssetPathsByMarkdown[markdownPath];
-            if (this.selectedCandidateAssetSectionsByMarkdown) {
-                delete this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
-            }
             return;
         }
 
         this.selectedCandidateAssetPathsByMarkdown[markdownPath] = normalized;
-    },
-
-    getSelectedCandidateAssetSection(markdownPath) {
-        if (!this.selectedCandidateAssetSectionsByMarkdown || !markdownPath) {
-            return null;
-        }
-
-        const section = this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
-        if (!section || !Number.isFinite(Number(section.startLine))) {
-            return null;
-        }
-
-        return {
-            startLine: Number(section.startLine),
-            endLine: Number(section.endLine),
-            assetPath: typeof section.assetPath === "string" ? section.assetPath : ""
-        };
-    },
-
-    setSelectedCandidateAssetSection(markdownPath, section) {
-        if (!markdownPath) {
-            return;
-        }
-
-        if (!this.selectedCandidateAssetSectionsByMarkdown) {
-            this.selectedCandidateAssetSectionsByMarkdown = {};
-        }
-
-        const startLine = Number(section && section.startLine);
-        const endLine = Number(section && section.endLine);
-        const assetPath = GPTViz.normalizeDependencyAssetPath(
-            section && section.assetPath ? section.assetPath : "",
-            ".png"
-        );
-
-        if (!Number.isFinite(startLine) || startLine < 0) {
-            delete this.selectedCandidateAssetSectionsByMarkdown[markdownPath];
-            return;
-        }
-
-        this.selectedCandidateAssetSectionsByMarkdown[markdownPath] = {
-            startLine,
-            endLine: Number.isFinite(endLine) ? endLine : startLine + 1,
-            assetPath
-        };
     },
 
     getActiveCandidateAssetPath(file) {
@@ -245,13 +240,13 @@ Object.assign(GPTViz.Plugin.prototype, {
 
     async handleMarkdownImageModeRequest(file, leaf) {
         if (!file || file.extension !== "md") {
-            await this.openCandidateView(null, leaf);
+            new GPTViz.obsidian.Notice("GPTViz: ImageMode needs a note.");
             return;
         }
 
         const assetRows = await this.getMovieModeAssetRowsForMarkdownFile(file);
         if (assetRows.length === 0) {
-            await this.openCandidateView(null, leaf);
+            await this.openCandidateView({ file, sourceLeaf: leaf });
             return;
         }
 
@@ -260,11 +255,6 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         const selectRow = async row => {
             this.setSelectedCandidateAssetPath(file.path, row.assetPath);
-            this.setSelectedCandidateAssetSection(file.path, {
-                startLine: row.startLine,
-                endLine: row.endLine,
-                assetPath: row.assetPath
-            });
 
             const editor = this.getMarkdownEditor(file);
             if (editor) {
@@ -281,7 +271,12 @@ Object.assign(GPTViz.Plugin.prototype, {
                 file,
                 row.assetPath
             );
-            await this.openCandidateView(preferredCandidatePath || null, leaf);
+            await this.openCandidateView({
+                file,
+                asset: row.assetPath,
+                candidate: preferredCandidatePath || null,
+                sourceLeaf: leaf
+            });
         };
 
         if (orderedRows.length === 1) {
@@ -289,16 +284,25 @@ Object.assign(GPTViz.Plugin.prototype, {
             return;
         }
 
-        new GPTViz.MovieAssetUsageModal(
+        new GPTViz.PickListModal(
             this.app,
-            file,
-            orderedRows,
-            selectRow
+            `Prompts in ${file.basename}`,
+            orderedRows.map(row => ({ label: row.label, value: row })),
+            `No Prompt/Extract headings in ${file.basename}.`,
+            async row => {
+                try {
+                    await selectRow(row);
+                } catch (error) {
+                    this.reportError("opening a prompt in Candidate View", error);
+                }
+            }
         ).open();
     },
 
     isCandidateView(view) {
-        return Boolean(view) && view.getViewType() === GPTViz.CANDIDATE_VIEW_TYPE;
+        // Class check, not type name: a tab Obsidian hasn't loaded yet holds a placeholder
+        // view that reports this type but has none of the Candidate View's methods.
+        return view instanceof GPTViz.CandidateView;
     },
 
     getCandidateView() {
@@ -310,13 +314,11 @@ Object.assign(GPTViz.Plugin.prototype, {
             : null;
     },
 
+    // After a plugin reload, the restored Candidate View leaf is rebuilt from its saved state.
     async rebuildCandidateViewAfterReload() {
         const workspace = this.app.workspace;
         const candidateLeaves = workspace.getLeavesOfType(
             GPTViz.CANDIDATE_VIEW_TYPE
-        );
-        const rememberedPath = this.getLastCandidatePath(
-            this.lastMarkdownFilePath
         );
 
         // No restored Candidate View leaf: don't create one, it would replace the active main view.
@@ -336,8 +338,10 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         await leaf.setViewState({
             type: GPTViz.CANDIDATE_VIEW_TYPE,
+            state: leaf.getViewState().state,
             active: wasActive
         });
+        await leaf.loadIfDeferred();
 
         if (wasActive) {
             await workspace.revealLeaf(leaf);
@@ -347,161 +351,48 @@ Object.assign(GPTViz.Plugin.prototype, {
         if (!this.isCandidateView(leaf.view)) {
             throw new Error(`Candidate View rebuild produced a ${leaf.view.getViewType()} view.`);
         }
-        leaf.view.plugin = this;
-        await leaf.view.refresh(rememberedPath);
     },
 
-    async refreshCandidateViews(preferredPath) {
-        const currentFile = this.getCurrentMarkdownFile();
-        const currentPath = currentFile ? currentFile.path : null;
-
-        for (const leaf of this.app.workspace.getLeavesOfType(
-            GPTViz.CANDIDATE_VIEW_TYPE
-        )) {
-            if (this.isCandidateView(leaf.view)) {
-                if (
-                    !preferredPath &&
-                    leaf.view.activeFile &&
-                    leaf.view.activeFile.path === currentPath
-                ) {
-                    continue;
-                }
-
-                leaf.view.plugin = this;
-                await leaf.view.refresh(preferredPath);
-            }
+    // Shows exactly target in the Candidate View: { file (the note), asset (defaults to the
+    // note's selected or same-named asset), candidate (a candidate path; defaults to the one
+    // last viewed), kept (show the kept image), sourceLeaf (the Markdown leaf it came from) }.
+    async openCandidateView(target) {
+        const file = target && target.file;
+        if (!file || file.extension !== "md") {
+            new GPTViz.obsidian.Notice("GPTViz: the Candidate View needs a note.");
+            return;
         }
-    },
 
-    describeMarkdownEditorFailure(file) {
+        this.recordBackPlace();
         const workspace = this.app.workspace;
-        const activeLeaf = workspace.activeLeaf;
-        const activeView = activeLeaf && activeLeaf.view;
-        const markdownLeaves = workspace.getLeavesOfType("markdown");
-        const requestedPath = file ? file.path : "<none>";
-        const activeViewType = activeView && typeof activeView.getViewType === "function"
-            ? activeView.getViewType()
-            : activeView?.constructor?.name || "<none>";
-        const activeViewFile = activeView?.file?.path || "<none>";
-        const leafDetails = markdownLeaves.length === 0
-            ? "  <none>"
-            : markdownLeaves.map((leaf, index) => {
-                const view = leaf.view;
-                const viewFile = view?.file?.path || "<none>";
-                const isMarkdownView = view instanceof GPTViz.obsidian.MarkdownView;
-                const hasEditor = Boolean(view?.editor);
-                return `  ${index + 1}. file=${viewFile}; ` +
-                    `isMarkdownView=${isMarkdownView}; hasEditor=${hasEditor}; ` +
-                    `isActive=${workspace.activeLeaf === leaf}`;
-            }).join("\n");
-
-        const reasons = [];
-        if (!file) {
-            reasons.push("No Markdown file could be resolved for the generation request.");
-        } else if (markdownLeaves.length === 0) {
-            reasons.push("The workspace returned no leaves of type 'markdown'.");
-        } else {
-            const matchingLeaves = markdownLeaves.filter(leaf =>
-                leaf.view?.file?.path === file.path
-            );
-            if (matchingLeaves.length === 0) {
-                reasons.push(`No Markdown leaf is showing the requested file: ${file.path}.`);
-            } else if (!matchingLeaves.some(leaf => Boolean(leaf.view?.editor))) {
-                reasons.push(`A Markdown leaf matches ${file.path}, but none exposes an editor.`);
-            }
-        }
-
-        return [
-            "No active Markdown editor was found.",
-            `Reason: ${reasons.join(" ")}`,
-            `Requested file: ${requestedPath}`,
-            `Remembered Markdown file: ${this.lastMarkdownFilePath || "<none>"}`,
-            `Active leaf view type: ${activeViewType}`,
-            `Active view file: ${activeViewFile}`,
-            `Markdown leaf count: ${markdownLeaves.length}`,
-            "Markdown leaves:",
-            leafDetails
-        ].join("\n");
-    },
-
-    async openCandidateView(preferredPath, sourceLeaf) {
-        if (this.openCandidateViewPromise) {
-            return this.openCandidateViewPromise;
-        }
-
-        this.openCandidateViewPromise = this.openCandidateViewNow(
-            preferredPath,
-            sourceLeaf
-        );
-
-        try {
-            return await this.openCandidateViewPromise;
-        } finally {
-            this.openCandidateViewPromise = null;
-        }
-    },
-
-    async openCandidateViewNow(preferredPath, sourceLeaf) {
-        const workspace = this.app.workspace;
-        const markdownView = sourceLeaf &&
-            sourceLeaf.view instanceof GPTViz.obsidian.MarkdownView
-            ? sourceLeaf.view
-            : workspace.getActiveViewOfType(
-                GPTViz.obsidian.MarkdownView
-            );
-
-        if (markdownView && markdownView.leaf) {
-            this.previousMarkdownLeaf = markdownView.leaf;
-            this.lastMarkdownFilePath = markdownView.file.path;
+        const sourceLeaf = target.sourceLeaf || workspace.getActiveViewOfType(GPTViz.obsidian.MarkdownView)?.leaf;
+        if (sourceLeaf && sourceLeaf.view instanceof GPTViz.obsidian.MarkdownView && sourceLeaf.view.file === file) {
+            this.previousMarkdownLeaf = sourceLeaf;
         }
 
         const candidateLeaves = workspace.getLeavesOfType(
             GPTViz.CANDIDATE_VIEW_TYPE
         );
-        let leaf = candidateLeaves[0];
+        const leaf = candidateLeaves[0] || workspace.getLeaf("tab");
 
         for (const duplicateLeaf of candidateLeaves.slice(1)) {
             duplicateLeaf.detach();
         }
 
-        if (!leaf) {
-            leaf = workspace.getLeaf("tab");
-            await leaf.setViewState({
-                type: GPTViz.CANDIDATE_VIEW_TYPE,
-                active: true
-            });
-        }
-
+        await leaf.setViewState({
+            type: GPTViz.CANDIDATE_VIEW_TYPE,
+            state: {
+                file: file.path,
+                asset: target.asset || this.getActiveCandidateAssetPath(file),
+                candidate: target.candidate || null,
+                kept: Boolean(target.kept)
+            },
+            active: true
+        });
         await workspace.revealLeaf(leaf);
         this.setCandidateViewActive(true);
 
-        if (this.isCandidateView(leaf.view)) {
-            leaf.view.plugin = this;
-            const rememberedPath = markdownView && markdownView.file
-                ? this.getLastCandidatePath(markdownView.file.path)
-                : this.getLastCandidatePath(this.lastMarkdownFilePath);
-            const targetPath = markdownView && markdownView.file
-                ? markdownView.file.path
-                : this.lastMarkdownFilePath;
-            const targetFile = targetPath
-                ? this.app.vault.getAbstractFileByPath(targetPath)
-                : null;
-            const targetAssetPath = targetFile && targetFile.extension === "md"
-                ? this.getActiveCandidateAssetPath(targetFile)
-                : "";
-            const currentAssetPath = GPTViz.normalizeDependencyAssetPath(
-                leaf.view.assetPath || "",
-                ".png"
-            );
-            const needsRefresh = Boolean(preferredPath) ||
-                !leaf.view.activeFile ||
-                leaf.view.activeFile.path !== targetPath ||
-                (Boolean(targetAssetPath) && currentAssetPath !== targetAssetPath);
-
-            if (needsRefresh) {
-                await leaf.view.refresh(preferredPath || rememberedPath);
-            }
-        } else {
+        if (!this.isCandidateView(leaf.view)) {
             throw new Error(
                 `Candidate View leaf has unexpected view type: ${leaf.view?.getViewType?.() || "<none>"}`
             );
