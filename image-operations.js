@@ -43,41 +43,47 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
     },
 
-    // Image generation call; its duration becomes the next progress estimate.
-    async requestImage(apiKey, promptText, imageInputs) {
-        const startedAt = Date.now();
-        const result = await GPTViz.generateOpenAIResponse(apiKey, promptText, imageInputs);
-        if (result.imageBase64) {
-            this.lastGenerationDurationMs = Date.now() - startedAt;
-        }
-        return result;
-    },
-
-    // Name and vault path of the next candidate for an asset: <asset>-<last number + 1>.png.
-    nextCandidatePath(activeFile, assetPath) {
+    // Name and vault path of the next candidate for an asset: <asset>-<last number + 1>.png,
+    // past the numbers that pending images (pendingNames) will take.
+    nextCandidatePath(activeFile, assetPath, pendingNames = []) {
         const assetName = assetPath.split("/").pop() || `${activeFile.basename}.png`;
         const baseName = assetName.replace(/\.[^./]+$/, "");
         const candidates = GPTViz.getImageCandidates(this.app, activeFile, assetPath);
-        const number = candidates.length > 0 ? candidates[candidates.length - 1].number + 1 : 1;
+        const prefix = `${baseName}-`.toLowerCase();
+        const numbers = [
+            ...candidates.map(candidate => candidate.number),
+            ...pendingNames
+                .filter(name => name.toLowerCase().startsWith(prefix))
+                .map(name => Number(name.slice(prefix.length).replace(/\.png$/i, "")))
+                .filter(Number.isFinite)
+        ];
+        const number = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
         const name = `${baseName}-${number}.png`;
-        return { name, path: GPTViz.contentPath(`candidates/${name}`) };
+        return { name, path: GPTViz.candidatePath(name) };
     },
 
     // Saves a generation result as the asset's next candidate (with the prompt embedded) and
-    // shows it. A response without an image is shown to the user and nothing is written.
-    async saveGeneratedCandidate(activeFile, assetPath, result, embeddedPrompt) {
+    // shows it, or (show false) only says so. It takes the name claimed when it was started
+    // (candidate), else the next one. A response without an image is shown to the user and
+    // nothing is written.
+    async saveGeneratedCandidate(activeFile, assetPath, result, embeddedPrompt, show = true, candidate = "") {
         if (!result.imageBase64) {
             new GPTViz.ResponseModal(this.app, result.text || "The API returned no image.").open();
             return;
         }
 
-        await GPTViz.ensureFolder(this.app, GPTViz.contentPath("candidates"));
+        await GPTViz.ensureFolder(this.app, GPTViz.getWorkspace().candidates);
 
-        const { path } = this.nextCandidatePath(activeFile, assetPath);
+        const claimed = candidate ? GPTViz.candidatePath(candidate) : "";
+        const path = claimed && !this.app.vault.getAbstractFileByPath(claimed)
+            ? claimed
+            : this.nextCandidatePath(activeFile, assetPath).path;
         const png = GPTViz.embedPromptInPng(GPTViz.base64ToArrayBuffer(result.imageBase64), embeddedPrompt);
 
         await this.app.vault.createBinary(path, png);
-        await this.openCandidateView({ file: activeFile, asset: assetPath, candidate: path });
+        if (show) {
+            await this.openCandidateView({ file: activeFile, asset: assetPath, candidate: path });
+        }
         new GPTViz.obsidian.Notice(`GPTViz: wrote ${path}`);
     }
 });

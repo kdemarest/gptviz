@@ -205,49 +205,14 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         this.plugin.syncModeRibbonForView(this);
     }
 
-    // MarkdownMode: show the note. If the cursor is already inside the Prompt for this asset,
-    // leave cursor and scroll alone; otherwise scroll that Prompt's heading to the top and put
-    // the cursor on its first line of prompt text (skipping blank and "Images:" lines).
+    // MarkdownMode: show the note, at the Prompt for this asset.
     async returnToNote() {
         const file = this.activeFile;
         if (!file) {
             throw new Error("The Candidate View is not showing a note.");
         }
 
-        const leaf = await this.plugin.openNote(file);
-        const view = leaf.view;
-        if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
-            throw new Error(`${file.path} opened in a ${view.getViewType()} view, not a Markdown view.`);
-        }
-
-        const editor = view.editor;
-        const assetPath = this.plugin.getWorkingAssetPath(file, this);
-        const section = GPTViz.findPromptSectionForAsset(editor.getValue(), assetPath, file.basename);
-        if (!section) {
-            return;
-        }
-
-        const cursorLine = editor.getCursor().line;
-        if (cursorLine >= section.startLine && cursorLine < section.endLine) {
-            return;
-        }
-
-        let line = section.startLine + 1;
-        while (line < section.endLine - 1 && /^[ \t]*(Images:.*)?$/i.test(editor.getLine(line))) {
-            line++;
-        }
-        editor.setCursor({ line: Math.min(line, section.endLine - 1, editor.lastLine()), ch: 0 });
-
-        if (view.getMode() === "preview") {
-            view.setEphemeralState({ line: section.startLine });
-            return;
-        }
-
-        const { EditorView } = require("@codemirror/view");
-        const cm = editor.cm;
-        cm.dispatch({
-            effects: EditorView.scrollIntoView(cm.state.doc.line(section.startLine + 1).from, { y: "start" })
-        });
+        await this.plugin.showPromptSection(file, this.plugin.getWorkingAssetPath(file, this));
     }
 
     async togglePolishInput() {
@@ -264,7 +229,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         let initialText = this.plugin.polishPromptCache[cacheKey] || "";
         if (initialText.trim() === "") {
             const polishFile = this.app.vault.getAbstractFileByPath(
-                GPTViz.contentPath("_polish.md")
+                GPTViz.outputPath("_polish.md")
             );
 
             if (polishFile && polishFile.extension === "md") {
@@ -750,7 +715,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
 
     async findKeptCandidateIndex() {
         const keptFile = this.app.vault.getAbstractFileByPath(
-            GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`)
+            GPTViz.outputPath(this.assetPath || `${this.activeFile.basename}.png`)
         );
 
         if (!keptFile || this.candidates.length === 0) {
@@ -799,7 +764,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         );
 
         const keptFile = this.app.vault.getAbstractFileByPath(
-            GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`)
+            GPTViz.outputPath(this.assetPath || `${this.activeFile.basename}.png`)
         );
         let isKept = false;
 
@@ -833,7 +798,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
         }
 
         if (showMarkButton) {
-            const sidecarPath = GPTViz.contentPath(`${this.activeFile.basename}.marks.json`);
+            const sidecarPath = GPTViz.outputPath(`${this.activeFile.basename}.marks.json`);
             this.markPoints = [];
             if (await this.app.vault.adapter.exists(sidecarPath)) {
                 try {
@@ -975,7 +940,7 @@ GPTViz.CandidateView = class extends GPTViz.obsidian.ItemView {
             }
         }
 
-        const path = GPTViz.contentPath(this.assetPath || `${this.activeFile.basename}.png`);
+        const path = GPTViz.outputPath(this.assetPath || `${this.activeFile.basename}.png`);
         const keptFile = this.app.vault.getAbstractFileByPath(path);
 
         if (keptFile) {

@@ -18,15 +18,14 @@ GPTViz.findStaleDependencies = async function(app) {
 
         const newerDependencies = [];
         const outputFile = app.vault.getAbstractFileByPath(
-            GPTViz.contentPath(`${markdownFile.basename}.png`)
+            GPTViz.outputPath(`${markdownFile.basename}.png`)
         );
 
         for (const imageName of imageNames) {
             const dependencyPath = /\.[^./]+$/.test(imageName)
                 ? imageName
                 : `${imageName}.png`;
-            const dependencyFile =
-                app.vault.getAbstractFileByPath(GPTViz.contentPath(dependencyPath));
+            const dependencyFile = GPTViz.resolveName(app, imageName, [".png"]).file;
             const displayName = dependencyPath.replace(/\.[^./]+$/, "");
 
             if (!dependencyFile || !dependencyFile.stat) {
@@ -52,7 +51,7 @@ GPTViz.findStaleDependencies = async function(app) {
     return rows;
 };
 
-GPTViz.getImageTagReferences = function(text) {
+GPTViz.getImageTagReferences = function(text, includeImagesTags = true) {
     const references = [];
     const addReference = value => {
         const reference = value.trim()
@@ -81,9 +80,11 @@ GPTViz.getImageTagReferences = function(text) {
         addReference(match[1]);
     }
 
-    for (const match of text.matchAll(/^[ \t]*Images:[ \t]*(.*)$/gim)) {
-        for (const value of match[1].split(",")) {
-            addReference(value);
+    if (includeImagesTags) {
+        for (const match of text.matchAll(/^[ \t]*Images:[ \t]*(.*)$/gim)) {
+            for (const value of match[1].split(",")) {
+                addReference(value);
+            }
         }
     }
 
@@ -97,7 +98,20 @@ GPTViz.findInvalidImageReferences = async function(app) {
         const content = await app.vault.cachedRead(markdownFile);
         const invalidImages = [];
 
-        for (const imageReference of GPTViz.getImageTagReferences(content)) {
+        // Images: names go through the search path; embeds and links through Obsidian.
+        const imagesTagNames = new Set();
+        for (const match of content.matchAll(/^[ \t]*Images:[ \t]*(.*)$/gim)) {
+            match[1].split(",").map(name => name.trim()).filter(Boolean).forEach(name => imagesTagNames.add(name));
+        }
+        imagesTagNames.delete("[[self]]"); // Polish's placeholder for the selected candidate
+        for (const name of imagesTagNames) {
+            const resolved = GPTViz.resolveName(app, name, [".png"]);
+            if (!resolved.file) {
+                invalidImages.push(name);
+            }
+        }
+
+        for (const imageReference of GPTViz.getImageTagReferences(content, false)) {
             let decodedReference = imageReference;
 
             try {
@@ -142,14 +156,14 @@ GPTViz.normalizeDependencyConfigPath = function(value, asDirectory) {
 };
 
 GPTViz.loadDependencyValidationConfig = async function(app) {
-    const path = GPTViz.contentPath("_config.json");
+    // Which notes are scanned comes from workspace.json; _config.json only excludes some.
+    const path = GPTViz.outputPath("_config.json");
     const adapter = app.vault.adapter;
 
     if (!(await adapter.exists(path))) {
         return {
             path,
             loaded: false,
-            sourceDirectories: [],
             excludedFiles: []
         };
     }
@@ -167,48 +181,8 @@ GPTViz.loadDependencyValidationConfig = async function(app) {
         throw new Error(`Invalid dependency config at ${path}: root must be a JSON object.`);
     }
 
-    if (!Object.prototype.hasOwnProperty.call(raw, "source_dirs")) {
-        throw new Error(`Invalid dependency config at ${path}: missing required 'source_dirs' array.`);
-    }
-
-    if (!Array.isArray(raw.source_dirs)) {
-        throw new Error(`Invalid dependency config at ${path}: 'source_dirs' must be an array.`);
-    }
-
-    const sourceDirectories = [];
-    const seenSourceDirectories = new Set();
-
-    for (let index = 0; index < raw.source_dirs.length; index++) {
-        const entry = raw.source_dirs[index];
-
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}] must be an object { dir, recurse }.`);
-        }
-
-        if (typeof entry.dir !== "string") {
-            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}].dir must be a string.`);
-        }
-
-        if (typeof entry.recurse !== "boolean") {
-            throw new Error(`Invalid dependency config at ${path}: source_dirs[${index}].recurse must be a boolean.`);
-        }
-
-        const normalizedDir = GPTViz.normalizeDependencyConfigPath(entry.dir, true);
-        const key = `${normalizedDir}::${entry.recurse ? "1" : "0"}`;
-
-        if (seenSourceDirectories.has(key)) {
-            continue;
-        }
-
-        seenSourceDirectories.add(key);
-        sourceDirectories.push({
-            dir: normalizedDir,
-            recurse: entry.recurse
-        });
-    }
-
-    if (sourceDirectories.length === 0) {
-        throw new Error(`Invalid dependency config at ${path}: 'source_dirs' must contain at least one entry.`);
+    if (Object.prototype.hasOwnProperty.call(raw, "source_dirs")) {
+        throw new Error(`Invalid dependency config at ${path}: 'source_dirs' is replaced by 'scan' in workspace.json; remove it.`);
     }
 
     const excludedFiles = [];
@@ -239,7 +213,6 @@ GPTViz.loadDependencyValidationConfig = async function(app) {
     return {
         path,
         loaded: true,
-        sourceDirectories,
         excludedFiles
     };
 };
@@ -265,63 +238,77 @@ GPTViz.matchesDependencyExcludePattern = function(filePath, pattern) {
 };
 
 GPTViz.isMarkdownFileAllowedForDependencyValidation = function(filePath, config) {
-    // Config paths are relative to the content root.
+    // Exclude patterns match the vault path (e.g. docs/source/*) or the file name (e.g. Lore.md).
     const vaultPath = GPTViz.normalizeDependencyConfigPath(filePath, false);
-    const contentPrefix = GPTViz.contentPath("");
-    if (!vaultPath.startsWith(contentPrefix)) {
+    if (!WorkspaceResolve.inScan(GPTViz.getWorkspace(), vaultPath)) {
         return false;
     }
-    const normalizedPath = vaultPath.slice(contentPrefix.length);
+    const fileName = vaultPath.slice(vaultPath.lastIndexOf("/") + 1);
     const excludedFiles = Array.isArray(config.excludedFiles)
         ? config.excludedFiles
         : [];
 
-    for (const pattern of excludedFiles) {
-        if (GPTViz.matchesDependencyExcludePattern(normalizedPath, pattern)) {
-            return false;
-        }
-    }
-
-    const sourceDirectories = Array.isArray(config.sourceDirectories)
-        ? config.sourceDirectories
-        : [];
-
-    if (sourceDirectories.length === 0) {
-        return false;
-    }
-
-    const parentDirectory = normalizedPath.includes("/")
-        ? normalizedPath.slice(0, normalizedPath.lastIndexOf("/") + 1)
-        : "";
-
-    for (const sourceDir of sourceDirectories) {
-        const dir = GPTViz.normalizeDependencyConfigPath(sourceDir.dir, true);
-        const recurse = sourceDir.recurse === true;
-
-        if (recurse) {
-            if (!dir || normalizedPath.startsWith(dir)) {
-                return true;
-            }
-            continue;
-        }
-
-        if (parentDirectory === dir) {
-            return true;
-        }
-    }
-
-    return false;
+    return !excludedFiles.some(pattern =>
+        GPTViz.matchesDependencyExcludePattern(vaultPath, pattern) ||
+        GPTViz.matchesDependencyExcludePattern(fileName, pattern)
+    );
 };
 
-// Vault folder holding all content (markdown sources, kept images, candidates, config).
-GPTViz.CONTENT_ROOT = "canvid";
+// workspace.json at the vault root names the search path, the outputs and candidates folders,
+// and the scan folders (see tools/resolve.js, bundled as WorkspaceResolve). It is loaded when
+// the plugin loads and again whenever it changes.
+GPTViz.workspace = null;
+GPTViz.workspaceIndex = null;
 
-GPTViz.contentPath = function(relativePath) {
-    return `${GPTViz.CONTENT_ROOT}/${relativePath}`;
+GPTViz.loadWorkspace = async function(app) {
+    GPTViz.workspace = null;
+    GPTViz.workspaceIndex = null;
+    if (!(await app.vault.adapter.exists(WorkspaceResolve.FILE))) {
+        throw new Error(`${WorkspaceResolve.FILE} is missing from the vault root; setup.sh writes a default one.`);
+    }
+    GPTViz.workspace = WorkspaceResolve.parse(await app.vault.adapter.read(WorkspaceResolve.FILE));
 };
 
+GPTViz.getWorkspace = function() {
+    if (!GPTViz.workspace) {
+        throw new Error(`${WorkspaceResolve.FILE} is not loaded; see the notice from plugin load.`);
+    }
+    return GPTViz.workspace;
+};
+
+// Where a generated file (image, Extract result, Mark sidecar, report) goes.
+GPTViz.outputPath = function(name) {
+    return WorkspaceResolve.outputPath(GPTViz.getWorkspace(), name);
+};
+
+GPTViz.candidatePath = function(name) {
+    return WorkspaceResolve.candidatePath(GPTViz.getWorkspace(), name);
+};
+
+// True for notes in a scan folder: the ones holding Prompt, Extract, Mark, and Script sections.
 GPTViz.isContentFile = function(file) {
-    return file.path.startsWith(GPTViz.contentPath(""));
+    return WorkspaceResolve.inScan(GPTViz.getWorkspace(), file.path);
+};
+
+GPTViz.isCandidateFile = function(file) {
+    return file.path.toLowerCase().startsWith(`${GPTViz.getWorkspace().candidates.toLowerCase()}/`);
+};
+
+// Finds a bare name on the search path: { path, shadowed, file } or { error }. The index is
+// rebuilt after any file is created, deleted, or renamed (see main.js).
+GPTViz.resolveName = function(app, name, extensions = []) {
+    if (!GPTViz.workspaceIndex) {
+        GPTViz.workspaceIndex = WorkspaceResolve.buildIndex(
+            GPTViz.getWorkspace(),
+            app.vault.getFiles().map(file => file.path)
+        );
+    }
+    const result = WorkspaceResolve.resolve(GPTViz.workspaceIndex, name, extensions);
+    if (result.error) {
+        return result;
+    }
+    const file = app.vault.getAbstractFileByPath(result.path);
+    return file ? { ...result, file } : { error: `'${name}' was indexed at ${result.path} but is gone` };
 };
 
 GPTViz.normalizeDependencyAssetPath = function(value, fallbackExtension) {
@@ -783,12 +770,20 @@ GPTViz.buildDependencyHeadingReport = async function(app) {
                 continue;
             }
 
-            const directFile = app.vault.getAbstractFileByPath(GPTViz.contentPath(dependency));
-            const candidateFile = app.vault.getAbstractFileByPath(GPTViz.contentPath(`candidates/${dependency}`));
-            const isResolvedByFile = Boolean(
-                (directFile && directFile.stat) ||
-                (candidateFile && candidateFile.stat)
-            );
+            const resolved = GPTViz.resolveName(app, dependency, [".png"]);
+            const isResolvedByFile = Boolean(resolved.file && resolved.file.stat);
+
+            if (isResolvedByFile && resolved.shadowed.length > 0) {
+                pushIssue(
+                    warnings,
+                    record.filePath,
+                    record.line,
+                    record.operation,
+                    record.name,
+                    `'${dependency}' is found at ${resolved.path}, which hides ${resolved.shadowed.join(", ")}.`,
+                    "shadowed_name"
+                );
+            }
 
             if (!isResolvedByFile) {
                 pushIssue(

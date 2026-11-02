@@ -38,6 +38,23 @@ Object.assign(GPTViz.Plugin.prototype, {
         return GPTViz.getPromptParts({ text: resolvedSectionText }).text;
     },
 
+    // Starts a "# Prompt <name>" in file, just after the Prompt for assetPath (else at the end),
+    // from the vault's reference-image header, replacing the blank lines between them.
+    async startPromptForImage(file, assetPath, name) {
+        await this.readNoteText(file);
+        await this.app.vault.process(file, text => {
+            const lines = text.replace(/\r\n/g, "\n").split("\n");
+            const section = GPTViz.findPromptSectionForAsset(text, assetPath, file.basename);
+            const end = section ? section.endLine : lines.length;
+            let at = end;
+            while (at > 0 && lines[at - 1].trim() === "") {
+                at--;
+            }
+            lines.splice(at, end - at, "", `# Prompt ${name}`, "", ...GPTViz.NEW_PROMPT_HEADER.split("\n"), "");
+            return lines.join("\n");
+        });
+    },
+
     // Rewrites the Prompt section for assetPath to savedPrompt, keeping its heading and Images: lines.
     async alignMarkdownPrompt(file, assetPath, savedPrompt) {
         await this.readNoteText(file);
@@ -79,6 +96,35 @@ Object.assign(GPTViz.Plugin.prototype, {
         await this.generate(section, activeFile, assetPath, progressView);
     },
 
+    // Traits of each image a prompt names, appended so the image model gets each subject's
+    // signature cues and relative size without the user retyping them. They come from the note
+    // whose Prompt produces the image, else the same-named note on the search path.
+    async getImageTraitsText(imageNames) {
+        const blocks = [];
+
+        for (let index = 0; index < imageNames.length; index++) {
+            const resolved = GPTViz.resolveName(this.app, imageNames[index], [".png"]);
+            if (!resolved.file) {
+                continue;
+            }
+            const asset = resolved.file.name;
+            const producer = this.findPromptNoteForImage(resolved.file);
+            const note = producer
+                ? producer.note
+                : GPTViz.resolveName(this.app, `${resolved.file.basename}.md`).file;
+            if (!note) {
+                continue;
+            }
+
+            const traits = GPTViz.findTraitsSection(await this.app.vault.cachedRead(note), asset);
+            if (traits) {
+                blocks.push(`Traits of image ${index + 1} (${resolved.file.basename}):\n${traits}`);
+            }
+        }
+
+        return blocks.join("\n\n");
+    },
+
     async resolveCompanionPromptForImagePath(imagePath, fallbackMarkdownFile) {
         const normalizedImagePath = String(imagePath || "").trim();
 
@@ -89,7 +135,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
 
         if (normalizedImagePath) {
-            if (normalizedImagePath.startsWith(GPTViz.contentPath("candidates/")) && fallbackMarkdownFile && fallbackMarkdownFile.path) {
+            if (GPTViz.isCandidateFile({ path: normalizedImagePath }) && fallbackMarkdownFile && fallbackMarkdownFile.path) {
                 companionCandidates.push(fallbackMarkdownFile.path);
             }
 
@@ -104,7 +150,10 @@ Object.assign(GPTViz.Plugin.prototype, {
 
             if (baseName) {
                 companionCandidates.push(`${imageDir}${baseName}.md`);
-                companionCandidates.push(GPTViz.contentPath(`${baseName}.md`));
+                const companion = GPTViz.resolveName(this.app, `${baseName}.md`);
+                if (companion.file) {
+                    companionCandidates.push(companion.path);
+                }
             }
         }
 
@@ -179,9 +228,11 @@ Object.assign(GPTViz.Plugin.prototype, {
             let sourceBinary = await this.app.vault.readBinary(candidate.file);
             let selectedCandidatePrompt = GPTViz.extractPromptFromPng(sourceBinary);
             const promptParts = GPTViz.getPromptPartsFromText(executionPrompt);
+            // [[self]] is the selected candidate. Candidates are not on the search path, so it
+            // is passed as the file itself.
             const imageNames = promptParts.imageNames.length > 0
-                ? promptParts.imageNames
-                : [candidate.file.path];
+                ? promptParts.imageNames.map(name => (name === candidate.file.name ? candidate.file : name))
+                : [candidate.file];
             let loadedImages = await GPTViz.loadPromptImages(
                 this.app,
                 imageNames
@@ -259,22 +310,47 @@ Object.assign(GPTViz.Plugin.prototype, {
             }
 
             const targetAssetPath = this.getWorkingAssetPath(activeFile, progressView);
+            // the new candidate's name (candidate is the selected one, the polish's source)
+            const newCandidate = await this.claimCandidateName(apiKey, activeFile, targetAssetPath);
 
             await this.runWithProgress(
                 progressView,
-                this.nextCandidatePath(activeFile, targetAssetPath).name,
+                newCandidate,
                 this.lastGenerationDurationMs || 60000,
                 "GPTViz: polishing cancelled.",
-                async isCancelled => {
-                    const result = await this.requestImage(apiKey, promptParts.text, loadedImages.imageInputs);
-                    if (!isCancelled()) {
-                        await this.saveGeneratedCandidate(activeFile, targetAssetPath, result, originalPrompt);
-                    }
-                }
+                async isCancelled => this.generateCandidate(apiKey, {
+                    file: activeFile,
+                    assetPath: targetAssetPath,
+                    promptText: promptParts.text,
+                    imageInputs: loadedImages.imageInputs,
+                    embeddedPrompt: originalPrompt,
+                    candidate: newCandidate
+                }, isCancelled)
             );
         } catch (error) {
             this.reportError("polishing an image", error);
         }
+    },
+
+    // What Generate sends for a Prompt section of file: its text with includes expanded, then
+    // the Traits of the images it names. Returns { promptParts, promptText }.
+    async buildPromptText(section, file) {
+        const resolvedPromptSectionText = await GPTViz.expandIncludesInText(
+            this.app,
+            section.text,
+            file.path,
+            [file.path],
+            8,
+            { disallowIncludedImagesTag: true }
+        );
+        const promptParts = GPTViz.getPromptParts({
+            text: resolvedPromptSectionText
+        });
+        const traitsText = await this.getImageTraitsText(promptParts.imageNames);
+        const promptText = traitsText
+            ? `${promptParts.text.trimEnd()}\n\n${traitsText}`
+            : promptParts.text;
+        return { promptParts, promptText };
     },
 
     async generate(section, activeFile, targetAssetPath, progressView) {
@@ -284,17 +360,12 @@ Object.assign(GPTViz.Plugin.prototype, {
         }
 
         try {
-            const resolvedPromptSectionText = await GPTViz.expandIncludesInText(
-                this.app,
-                section.text,
-                activeFile.path,
-                [activeFile.path],
-                8,
-                { disallowIncludedImagesTag: true }
-            );
-            const promptParts = GPTViz.getPromptParts({
-                text: resolvedPromptSectionText
-            });
+            const { promptParts, promptText } = await this.buildPromptText(section, activeFile);
+            const missing = promptParts.imageNames.filter(name => !GPTViz.resolveName(this.app, name, [".png"]).file);
+            if (missing.length > 0) {
+                await this.showMissingImages(activeFile, targetAssetPath, missing);
+                return;
+            }
             const loadedImages = await GPTViz.loadPromptImages(
                 this.app,
                 promptParts.imageNames
@@ -308,17 +379,20 @@ Object.assign(GPTViz.Plugin.prototype, {
                 return;
             }
 
+            const candidate = await this.claimCandidateName(apiKey, activeFile, targetAssetPath);
             await this.runWithProgress(
                 progressView,
-                this.nextCandidatePath(activeFile, targetAssetPath).name,
+                candidate,
                 this.lastGenerationDurationMs || 60000,
                 "GPTViz: generation cancelled.",
-                async isCancelled => {
-                    const result = await this.requestImage(apiKey, promptParts.text, loadedImages.imageInputs);
-                    if (!isCancelled()) {
-                        await this.saveGeneratedCandidate(activeFile, targetAssetPath, result, promptParts.text);
-                    }
-                }
+                async isCancelled => this.generateCandidate(apiKey, {
+                    file: activeFile,
+                    assetPath: targetAssetPath,
+                    promptText,
+                    imageInputs: loadedImages.imageInputs,
+                    embeddedPrompt: promptText,
+                    candidate
+                }, isCancelled)
             );
         } catch (error) {
             this.reportError("generating an image", error);

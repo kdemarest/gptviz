@@ -1,4 +1,4 @@
-{#include ../canvid/SharedProjects.md}
+{#include ../vids/SharedProjects.md}
 
 
 Quick context (always load):

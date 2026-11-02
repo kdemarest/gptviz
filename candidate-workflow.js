@@ -11,13 +11,24 @@ Object.assign(GPTViz.Plugin.prototype, {
     // Obsidian's heading index: a Prompt named for the asset, or a note's unnamed Prompt for
     // <note>.png. Null for images no Prompt produces.
     findPromptNoteForImage(file) {
-        if (!GPTViz.isContentFile(file)) {
+        // Kept images are in the outputs folder, candidates in the candidates folder.
+        const workspace = GPTViz.getWorkspace();
+        const lower = file.path.toLowerCase();
+        const candidatesPrefix = `${workspace.candidates.toLowerCase()}/`;
+        const outputsPrefix = `${workspace.outputs.toLowerCase()}/`;
+        let candidateMatch = null;
+        let asset;
+        if (lower.startsWith(candidatesPrefix)) {
+            candidateMatch = /^(.+)-\d+\.png$/i.exec(file.path.slice(candidatesPrefix.length));
+            if (!candidateMatch) {
+                return null;
+            }
+            asset = `${candidateMatch[1]}.png`;
+        } else if (lower.startsWith(outputsPrefix)) {
+            asset = file.path.slice(outputsPrefix.length);
+        } else {
             return null;
         }
-
-        const contentRelativePath = file.path.slice(GPTViz.contentPath("").length);
-        const candidateMatch = /^candidates\/(.+)-\d+\.png$/i.exec(contentRelativePath);
-        const asset = candidateMatch ? `${candidateMatch[1]}.png` : contentRelativePath;
         const target = asset.toLowerCase();
 
         for (const note of this.app.vault.getMarkdownFiles().filter(GPTViz.isContentFile)) {
@@ -183,7 +194,7 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         const assetPaths = this.getCandidateAssetPathsForMarkdownFile(file);
         for (const assetPath of assetPaths) {
-            const keptFile = this.app.vault.getAbstractFileByPath(GPTViz.contentPath(assetPath));
+            const keptFile = this.app.vault.getAbstractFileByPath(GPTViz.outputPath(assetPath));
             if (keptFile && keptFile.extension === "png") {
                 return true;
             }
@@ -211,7 +222,7 @@ Object.assign(GPTViz.Plugin.prototype, {
 
         for (const vaultFile of this.app.vault.getFiles()) {
             if (
-                !vaultFile.path.startsWith(GPTViz.contentPath("candidates/")) ||
+                !GPTViz.isCandidateFile(vaultFile) ||
                 vaultFile.extension !== "png"
             ) {
                 continue;

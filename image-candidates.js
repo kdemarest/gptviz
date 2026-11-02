@@ -13,7 +13,7 @@ GPTViz.getImageCandidates = function(app, activeFile, assetPath) {
 
     for (const file of app.vault.getFiles()) {
         if (
-            file.path.startsWith(GPTViz.contentPath("candidates/")) &&
+            GPTViz.isCandidateFile(file) &&
             file.extension === "png" &&
             file.name.startsWith(prefix)
         ) {
@@ -75,7 +75,7 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
         ".png"
     );
     const keptFile = app.vault.getAbstractFileByPath(
-        GPTViz.contentPath(normalizedAssetPath)
+        GPTViz.outputPath(normalizedAssetPath)
     );
     const candidates = GPTViz.getImageCandidates(app, activeFile, normalizedAssetPath);
 
@@ -111,14 +111,14 @@ GPTViz.ensureKeptImageCandidate = async function(app, activeFile, assetPath) {
         );
     }
 
-    await GPTViz.ensureFolder(app, GPTViz.contentPath("candidates"));
+    await GPTViz.ensureFolder(app, GPTViz.getWorkspace().candidates);
 
     const assetName = normalizedAssetPath.split("/").pop() || `${activeFile.basename}.png`;
     const assetBaseName = assetName.replace(/\.[^./]+$/, "");
     const number = candidates.length > 0
         ? candidates[candidates.length - 1].number + 1
         : 1;
-    const path = GPTViz.contentPath(`candidates/${assetBaseName}-${number}.png`);
+    const path = GPTViz.candidatePath(`${assetBaseName}-${number}.png`);
 
     try {
         await app.vault.createBinary(

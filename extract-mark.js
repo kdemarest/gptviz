@@ -218,8 +218,8 @@ Object.assign(GPTViz.Plugin.prototype, {
                     const rawPng = GPTViz.base64ToArrayBuffer(response.imageBase64s[0]);
                     const outputPng = await GPTViz.removeKeyColorFromPng(rawPng);
 
-                    await this.ensureParentFolders(GPTViz.contentPath(block.asset));
-                    await this.writeBinaryOverwrite(GPTViz.contentPath(block.asset), outputPng);
+                    await this.ensureParentFolders(GPTViz.outputPath(block.asset));
+                    await this.writeBinaryOverwrite(GPTViz.outputPath(block.asset), outputPng);
                     writtenAssets.push(block.asset);
                 }
 
@@ -329,7 +329,7 @@ Object.assign(GPTViz.Plugin.prototype, {
                     updatedAt: new Date().toISOString(),
                     marks
                 };
-                const sidecarPath = GPTViz.contentPath(`${activeFile.basename}.marks.json`);
+                const sidecarPath = GPTViz.outputPath(`${activeFile.basename}.marks.json`);
                 await this.app.vault.adapter.write(
                     sidecarPath,
                     JSON.stringify(payload, null, 2)

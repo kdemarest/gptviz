@@ -153,21 +153,27 @@ GPTViz.PickListModal = class extends GPTViz.obsidian.Modal {
 };
 
 // DependsMode's compact, file-explorer-style list of what subject (a name) depends on.
-// rows: [{ label, value }]; tapping a row calls onPick(value). unresolvedLabels are listed
-// muted and inert.
+// rows: [{ label, value, detail }]; detail, if any, is small warning text after the label (an
+// out-of-date dependency). Tapping a row calls onPick(value). unresolvedLabels are listed
+// muted and inert. options: { title, message, unresolvedSuffix } for other lists of images
+// (Generate's missing images).
 GPTViz.DependsModal = class extends GPTViz.obsidian.Modal {
-    constructor(app, subject, rows, unresolvedLabels, onPick) {
+    constructor(app, subject, rows, unresolvedLabels, onPick, options = {}) {
         super(app);
         this.subject = subject;
         this.rows = rows;
         this.unresolvedLabels = unresolvedLabels;
         this.onPick = onPick;
+        this.options = options;
     }
 
     onOpen() {
         const contentEl = this.contentEl;
         contentEl.empty();
-        this.titleEl.textContent = `${this.subject} depends on`;
+        this.titleEl.textContent = this.options.title || `${this.subject} depends on`;
+        if (this.options.message) {
+            contentEl.createEl("p", { text: this.options.message });
+        }
 
         if (this.rows.length === 0 && this.unresolvedLabels.length === 0) {
             contentEl.createEl("p", {
@@ -180,10 +186,16 @@ GPTViz.DependsModal = class extends GPTViz.obsidian.Modal {
         list.style.maxHeight = "60vh";
         list.style.overflowY = "auto";
 
-        for (const { label, value } of this.rows) {
+        for (const { label, value, detail } of this.rows) {
             const row = list.createDiv({ cls: "tree-item nav-file" })
                 .createDiv({ cls: "tree-item-self nav-file-title is-clickable" });
             row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: label });
+            if (detail) {
+                const flair = row.createDiv({ cls: "tree-item-flair-outer" })
+                    .createSpan({ cls: "tree-item-flair", text: `⚠ ${detail}` });
+                flair.style.color = "var(--text-warning)";
+                flair.style.fontSize = "var(--font-ui-smaller)";
+            }
             row.addEventListener("click", async () => {
                 this.close();
                 await this.onPick(value);
@@ -194,7 +206,7 @@ GPTViz.DependsModal = class extends GPTViz.obsidian.Modal {
             const row = list.createDiv({ cls: "tree-item nav-file" })
                 .createDiv({ cls: "tree-item-self nav-file-title" });
             row.style.color = "var(--text-faint)";
-            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: `${label} (no note)` });
+            row.createDiv({ cls: "tree-item-inner nav-file-title-content", text: `${label} ${this.options.unresolvedSuffix || "(no note)"}` });
         }
     }
 

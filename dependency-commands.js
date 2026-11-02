@@ -39,7 +39,7 @@ Object.assign(GPTViz.Plugin.prototype, {
         try {
             GPTViz.dependencyFileScans.clear();
             const report = await GPTViz.buildDependencyHeadingReport(this.app);
-            const reportPath = GPTViz.contentPath("_deps.md");
+            const reportPath = GPTViz.outputPath("_deps.md");
             let reportFile = this.app.vault.getAbstractFileByPath(reportPath);
             if (reportFile) {
                 await this.app.vault.modify(reportFile, report.markdown);

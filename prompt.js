@@ -113,6 +113,16 @@ GPTViz.getPromptSectionFromLines = function(lines, startLine) {
 
 // The Prompt section that produces assetPath: the Prompt named for it, or, for the note's
 // own image (<note>.png), its unnamed Prompt (else its first Prompt). Null if none does.
+// The opening of a new reference-image Prompt (docs/CLAUDE.md's standard header); the user
+// replaces <subject> and describes it below.
+GPTViz.NEW_PROMPT_HEADER = [
+    "Use the following image prompt verbatim:",
+    "",
+    "High-end AAA fantasy concept art for a modern VR game, combining stylized realism and believable materials.",
+    "",
+    "This is a reference image for <subject>. The background is white, keeping our focus ONLY on the subject. No text, no embellishment."
+].join("\n");
+
 GPTViz.findPromptSectionForAsset = function(text, assetPath, noteBasename) {
     const sections = GPTViz.getPromptSectionsFromText(text.replace(/\r\n/g, "\n"));
     const nameOf = section => {
@@ -130,6 +140,42 @@ GPTViz.findPromptSectionForAsset = function(text, assetPath, noteBasename) {
     }
     return sections.find(section => !nameOf(section)) || sections[0] || null;
 };
+// The body of a note's Traits section for asset: "Traits <asset>" if there is one, else a bare
+// "Traits" (which covers every prompt in the note), else null.
+GPTViz.findTraitsSection = function(text, asset) {
+    const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    const target = GPTViz.normalizeDependencyAssetPath(asset, ".png").toLowerCase();
+    let named = null;
+    let bare = null;
+
+    for (let line = 0; line < lines.length; line++) {
+        const heading = GPTViz.parseHeading(lines[line]);
+        const match = heading ? /^traits\b[:\s]*(.*)$/i.exec(heading.text.trim()) : null;
+        if (!match) {
+            continue;
+        }
+
+        let end = lines.length;
+        for (let next = line + 1; next < lines.length; next++) {
+            const nextHeading = GPTViz.parseHeading(lines[next]);
+            if (nextHeading && nextHeading.level <= heading.level) {
+                end = next;
+                break;
+            }
+        }
+        const body = lines.slice(line + 1, end).join("\n").trim();
+        const name = match[1].trim();
+
+        if (!name) {
+            bare = bare === null ? body : bare;
+        } else if (GPTViz.normalizeDependencyAssetPath(name, ".png").toLowerCase() === target) {
+            named = body;
+        }
+    }
+
+    return named !== null ? named : bare;
+};
+
 GPTViz.getPromptParts = function(section) {
     const textLines = [];
     const imageNames = [];
@@ -218,35 +264,6 @@ GPTViz.normalizeVaultPath = function(path) {
     return parts.join("/");
 };
 
-GPTViz.resolveIncludePath = function(targetPath, fromPath, vaultName) {
-    let includePath = String(targetPath || "").trim();
-
-    if (!includePath) {
-        return "";
-    }
-
-    includePath = includePath.replace(/^<|>$/g, "").replace(/\\/g, "/");
-
-    if (includePath.startsWith("/")) {
-        const marker = `/${vaultName}/`;
-        const markerIndex = includePath.indexOf(marker);
-
-        if (markerIndex !== -1) {
-            includePath = includePath.slice(markerIndex + marker.length);
-        }
-
-        return GPTViz.normalizeVaultPath(includePath.replace(/^\/+/, ""));
-    }
-
-    const sourcePath = GPTViz.normalizeVaultPath(fromPath || "");
-    const slashIndex = sourcePath.lastIndexOf("/");
-    const sourceDir = slashIndex === -1
-        ? ""
-        : sourcePath.slice(0, slashIndex + 1);
-
-    return GPTViz.normalizeVaultPath(`${sourceDir}${includePath}`);
-};
-
 GPTViz.extractHeadingBodyFromText = function(text, headingName) {
     const target = GPTViz.normalizeIncludeHeadingLabel(headingName);
 
@@ -320,17 +337,15 @@ GPTViz.expandIncludesInText = async function(app, text, fromPath, includeStack =
             );
         }
 
-        const resolvedPath = GPTViz.resolveIncludePath(
-            includeSpec.path,
-            fromPath,
-            app.vault.getName()
-        );
+        const resolved = GPTViz.resolveName(app, includeSpec.path, [".md"]);
 
-        if (!resolvedPath) {
+        if (resolved.error) {
             throw new Error(
-                `Include error at ${sourceLabel}:${sourceLine} - could not resolve include path '${includeSpec.path}'.`
+                `Include error at ${sourceLabel}:${sourceLine} - ${resolved.error}.`
             );
         }
+
+        const resolvedPath = resolved.path;
 
         const includeKey = includeSpec.heading
             ? `${resolvedPath}#${includeSpec.heading}`
@@ -343,7 +358,7 @@ GPTViz.expandIncludesInText = async function(app, text, fromPath, includeStack =
             );
         }
 
-        const includeFile = app.vault.getAbstractFileByPath(resolvedPath);
+        const includeFile = resolved.file;
 
         if (!includeFile || !includeFile.extension) {
             throw new Error(
@@ -596,25 +611,23 @@ GPTViz.extractPromptFromPng = function(binary) {
     return null;
 };
 
-GPTViz.loadPromptImages = async function(app, imageNames) {
+// images: bare names, found on the search path (a missing extension means .png), or files.
+GPTViz.loadPromptImages = async function(app, images) {
     const imageInputs = [];
     const sourcePrompts = [];
     const warnings = [];
 
-    for (const imageName of imageNames) {
-        const path = /\.[^./]+$/.test(imageName)
-            ? imageName
-            : `${imageName}.png`;
-        let file = app.vault.getAbstractFileByPath(GPTViz.contentPath(path));
-
-        if (!file || !file.extension) {
-            file = app.vault.getAbstractFileByPath(GPTViz.contentPath(`candidates/${path}`));
+    for (const image of images) {
+        let file = image;
+        if (typeof image === "string") {
+            const resolved = GPTViz.resolveName(app, image, [".png"]);
+            if (resolved.error) {
+                warnings.push(`Image not found: ${resolved.error}`);
+                continue;
+            }
+            file = resolved.file;
         }
-
-        if (!file || !file.extension) {
-            warnings.push(`Image not found: ${path}`);
-            continue;
-        }
+        const path = file.path;
 
         const extension = file.extension.toLowerCase();
         const mimeTypes = {

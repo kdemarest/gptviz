@@ -8,6 +8,24 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         await this.loadSettings();
         await this.appendRunLog();
 
+        // workspace.json says where named files are found and where outputs go.
+        const loadWorkspace = () => GPTViz.loadWorkspace(this.app).catch(error => {
+            new GPTViz.obsidian.Notice(`GPTViz: ${error.message}`, 0);
+            console.error("GPTViz:", error);
+        });
+        await loadWorkspace();
+        const forgetIndex = () => {
+            GPTViz.workspaceIndex = null;
+        };
+        this.registerEvent(this.app.vault.on("create", forgetIndex));
+        this.registerEvent(this.app.vault.on("delete", forgetIndex));
+        this.registerEvent(this.app.vault.on("rename", forgetIndex));
+        this.registerEvent(this.app.vault.on("modify", file => {
+            if (file.path === WorkspaceResolve.FILE) {
+                loadWorkspace();
+            }
+        }));
+
         this.candidateViewStyle = document.createElement("style");
         this.candidateViewStyle.textContent = `
             .gptviz-candidate-active .mobile-navbar {
@@ -112,6 +130,18 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         });
 
         this.addCommand({
+            id: "gpt-fetch-pending",
+            name: "GPTViz Fetch Pending Images",
+            callback: async () => {
+                try {
+                    await this.resumePendingImages(true);
+                } catch (error) {
+                    this.reportError("fetching pending images", error);
+                }
+            }
+        });
+
+        this.addCommand({
             id: "gpt-review-images",
             name: "GPTViz Review Images",
             callback: async () => {
@@ -147,6 +177,9 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
             this.rebuildCandidateViewAfterReload().catch(error => {
             this.reportError("recovering Candidate View after plugin reload", error);
             });
+            this.resumePendingImages(false).catch(error => {
+                this.reportError("fetching pending images", error);
+            });
         });
     }
 
@@ -170,6 +203,7 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
     }
 
     onunload() {
+        this.unloaded = true; // stops pending-image polls
         this.removeAllModeRibbons();
         this.setCandidateViewActive(false);
 
@@ -219,6 +253,55 @@ GPTViz.Plugin = class extends GPTViz.obsidian.Plugin {
         }
 
         return leaf;
+    }
+
+    // Opens file at the Prompt for assetPath. If the cursor is already inside it, leaves cursor
+    // and scroll alone; otherwise scrolls its heading to the top and puts the cursor on its
+    // first line of prompt text (skipping blank and "Images:" lines). Returns the view.
+    // With a leaf, the note opens in that leaf (unless it already shows it), else via openNote.
+    async showPromptSection(file, assetPath, inLeaf = null) {
+        let leaf = inLeaf;
+        if (!leaf) {
+            leaf = await this.openNote(file);
+        } else {
+            this.recordBackPlace();
+            if (leaf.view?.file?.path !== file.path) {
+                await leaf.openFile(file);
+            }
+        }
+        const view = leaf.view;
+        if (!(view instanceof GPTViz.obsidian.MarkdownView)) {
+            throw new Error(`${file.path} opened in a ${view.getViewType()} view, not a Markdown view.`);
+        }
+
+        const editor = view.editor;
+        const section = GPTViz.findPromptSectionForAsset(editor.getValue(), assetPath, file.basename);
+        if (!section) {
+            return view;
+        }
+
+        const cursorLine = editor.getCursor().line;
+        if (cursorLine >= section.startLine && cursorLine < section.endLine) {
+            return view;
+        }
+
+        let line = section.startLine + 1;
+        while (line < section.endLine - 1 && /^[ \t]*(Images:.*)?$/i.test(editor.getLine(line))) {
+            line++;
+        }
+        editor.setCursor({ line: Math.min(line, section.endLine - 1, editor.lastLine()), ch: 0 });
+
+        if (view.getMode() === "preview") {
+            view.setEphemeralState({ line: section.startLine });
+            return view;
+        }
+
+        const { EditorView } = require("@codemirror/view");
+        const cm = editor.cm;
+        cm.dispatch({
+            effects: EditorView.scrollIntoView(cm.state.doc.line(section.startLine + 1).from, { y: "start" })
+        });
+        return view;
     }
 
     getMarkdownEditor(file) {

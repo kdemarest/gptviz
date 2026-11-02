@@ -14,7 +14,7 @@ MarkdownMode, ImageMode and MovieMode show the same thing in another form. A but
 
 | Viewing | MarkdownMode | ImageMode | MovieMode | DependsMode |
 |---|---|---|---|---|
-| Note (md) | grey | its image(s) in candidate view; grey for a note with no Prompt or image | play its Script (pick if several); else the scripts using its assets (pick if several) → script md | pick an input → its md |
+| Note (md) | grey | its image(s) in candidate view; grey for a note with no Prompt or image | play its Script (pick if several); else the scripts using its assets (pick if several) → script md | for the Prompt/Extract at the cursor, else one picked from the note (a note with none: the whole note), pick an input → its md, at its Prompt |
 | Candidate view | the note, at this image's Prompt | grey | as for its note | pick an input of this image → its image in candidate view |
 | Movie player | the script md | grey | grey | pick an image the script shows → its image in candidate view |
 

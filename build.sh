@@ -25,7 +25,8 @@ mapfile -t UNIT_FILES < <(
     ! -name '_preamble.js' \
     | sort
 )
-JS_FILES=("./_preamble.js" "${UNIT_FILES[@]}")
+# The workspace resolver (search path, outputs) is shared with movi; see ../tools/resolve.js.
+JS_FILES=("./_preamble.js" "../tools/resolve.js" "${UNIT_FILES[@]}")
 
 if [ "${#JS_FILES[@]}" -eq 0 ]; then
   echo "Build failed: no source .js files found in $(pwd)" >&2
@@ -50,7 +51,10 @@ for FILE in "${JS_FILES[@]}"; do
   fi
 
   RELATIVE_FILE=${FILE#./}
-  SOURCE_PATH="gptviz/$RELATIVE_FILE"
+  case "$RELATIVE_FILE" in
+    ../*) SOURCE_PATH=${RELATIVE_FILE#../} ;;
+    *) SOURCE_PATH="gptviz/$RELATIVE_FILE" ;;
+  esac
   ESCAPED_SOURCE_PATH=$(printf '%s' "$SOURCE_PATH" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
   ENTRY=$(cat <<EOF
